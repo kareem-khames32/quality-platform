@@ -1,0 +1,31 @@
+<%- include('partials/header', { title: 'الشكاوى' }) %>
+<div class="card">
+  <form method="GET" action="/tickets" class="row">
+    <div><label>الحالة</label><select name="status"><option value="active" <%= qs.status==='active'?'selected':'' %>>المفتوحة وقيد المعالجة</option><% for (const [k,v] of Object.entries(TICKET_AR)) { %><option value="<%= k %>" <%= qs.status===k?'selected':'' %>><%= v %></option><% } %><option value="all" <%= qs.status==='all'?'selected':'' %>>الكل</option></select></div>
+    <div><label>الشركة</label><select name="company"><option value="">الكل</option><% for (const c of companies) { %><option value="<%= c.id %>" <%= String(qs.company)===String(c.id)?'selected':'' %>><%= c.name %></option><% } %></select></div>
+    <div><label>الخطورة</label><select name="severity"><option value="">الكل</option><option value="high" <%= qs.severity==='high'?'selected':'' %>>عالية</option><option value="medium" <%= qs.severity==='medium'?'selected':'' %>>متوسطة</option><option value="low" <%= qs.severity==='low'?'selected':'' %>>منخفضة</option></select></div>
+    <div style="flex:0"><button class="btn">تصفية</button></div>
+  </form>
+</div>
+<div class="card">
+  <div class="card-title">🎫 تذاكر الشكاوى <span class="badge"><%= rows.length %></span></div>
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th style="min-width:200px">العنوان</th><th>الخطورة</th><th>الشركة</th><th>الموظف</th><th>السنترال</th><th>تاريخ المكالمة</th><th>الخطوة / المسؤول</th><th>المهلة</th><th>الحالة</th><th>أُنشئت</th></tr>
+    <% const nowTs = Date.now(); for (const t of rows) { const overdue = t.due_at && ['open','in_progress'].includes(t.status) && new Date(t.due_at.replace(' ','T')).getTime() < nowTs; %>
+    <tr>
+      <td><a href="/tickets/<%= t.id %>">#<%= t.id %></a></td>
+      <td><a href="/tickets/<%= t.id %>"><%= t.title %></a></td>
+      <td><span class="chip <%= t.severity %>"><%= {high:'تدخل فوري',medium:'متوسطة',low:'منخفضة'}[t.severity] %></span></td>
+      <td><% if (t.company_name) { %><%= t.company_name %><% } else { %><span class="muted">غير محددة</span><% } %></td>
+      <td><%= t.agent_name || t.agent_ext || '—' %></td>
+      <td class="muted"><%= t.server_name %></td>
+      <td class="muted nowrap"><span class="dt"><%= t.calldate %></span></td>
+      <td class="nowrap"><span class="badge"><%= t.step_no %>/<%= t.step_total %></span> <%= t.step_role && ROLES[t.step_role] ? ROLES[t.step_role].label : '' %> <span class="muted"><%= t.assignee || '' %></span></td>
+      <td class="nowrap"><% if (t.due_at && ['open','in_progress'].includes(t.status)) { %><span class="badge <%= overdue ? 'red' : 'gray' %>" title="<%= t.due_at %>"><%= overdue ? '⏰ متأخرة' : 'قبل ' + t.due_at.slice(5, 16) %></span><% } else { %>—<% } %></td>
+      <td><span class="badge <%= t.status==='open'?'red':t.status==='in_progress'?'amber':'green' %>"><%= TICKET_AR[t.status] %></span></td>
+      <td class="muted nowrap"><span class="dt"><%= t.created_at %></span></td>
+    </tr>
+    <% } if (!rows.length) { %><tr><td colspan="11" class="muted">لا توجد تذاكر.</td></tr><% } %>
+  </table></div>
+</div>
+<%- include('partials/footer') %>

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title><%= typeof title !== 'undefined' ? title + ' | ' : '' %>جودة المكالمات</title>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<% if (user) { %>
+<nav class="nav">
+  <span class="nav-title">🎧 جودة المكالمات</span>
+  <% if (isStaff) { %>
+  <a class="nav-link <%= path === '/' ? 'active' : '' %>" href="/">📊 اللوحة</a>
+  <a class="nav-link <%= path.startsWith('/calls') ? 'active' : '' %>" href="/calls">📞 المكالمات</a>
+  <% } %>
+  <a class="nav-link <%= path.startsWith('/tickets') ? 'active' : '' %>" href="/tickets">🎫 الشكاوى <% if (openTickets) { %><span class="badge red"><%= openTickets %></span><% } %></a>
+  <% if (user.role === 'admin' || (ROLES[user.role] && ROLES[user.role].banned)) { %>
+  <a class="nav-link <%= path.startsWith('/admin/banned') ? 'active' : '' %>" href="/admin/banned">🚫 الكلمات المحظورة</a>
+  <% } %>
+  <% if (user.role === 'admin') { %>
+  <a class="nav-link <%= path.startsWith('/admin/companies') || path.startsWith('/admin/servers') || path.startsWith('/admin/extensions') ? 'active' : '' %>" href="/admin/companies">🏢 الشركات والتحويلات</a>
+  <a class="nav-link <%= path.startsWith('/admin/users') ? 'active' : '' %>" href="/admin/users">👥 المستخدمون</a>
+  <a class="nav-link <%= path.startsWith('/admin/settings') ? 'active' : '' %>" href="/admin/settings">⚙️ الإعدادات</a>
+  <% } %>
+  <span class="spacer"></span>
+  <a href="/calls?status=queued&from=" id="queueWidget" class="badge gray" title="طابور التحويل: في الانتظار / جاري / فشل">⏳ …</a>
+  <script>
+  (async function pollQueue(){
+    try { const j = await (await fetch('/api/queue.json')).json(); const s = j.stats; const el = document.getElementById('queueWidget');
+      el.textContent = `⏳ ${s.queued} في الانتظار · ⚙️ ${s.working} جاري · ✅ ${s.done_today} اليوم` + (s.failed ? ` · ❌ ${s.failed}` : '');
+      el.className = 'badge ' + (s.working ? 'amber' : s.queued ? 'blue' : 'gray');
+      if (window.onQueueUpdate) window.onQueueUpdate(j);
+    } catch (e) {}
+    setTimeout(pollQueue, 5000);
+  })();
+  </script>
+  <span class="muted" title="حالة المزودين">
+    <span class="badge <%= providers.gateway ? 'green' : 'red' %>">البوابة</span>
+    <span class="badge <%= providers.stt ? 'green' : 'red' %>">STT</span>
+    <span class="badge <%= providers.llm ? 'green' : 'gray' %>">AI</span>
+  </span>
+  <a href="/notifications" class="bell" id="bell" title="الإشعارات">🔔<% if (unread) { %><span class="cnt" id="bellCnt"><%= unread %></span><% } %></a>
+  <script>window.onQueueUpdate = (j) => { const b = document.getElementById('bell'); let c = document.getElementById('bellCnt'); if (j.unread) { if (!c) { c = document.createElement('span'); c.className = 'cnt'; c.id = 'bellCnt'; b.appendChild(c); } c.textContent = j.unread; } else if (c) c.remove(); };</script>
+  <span class="badge blue" title="<%= user.username %>"><%= user.full_name || user.username %> · <%= ROLES[user.role] ? ROLES[user.role].label : user.role %></span>
+  <a class="nav-link" href="/change-password">🔑</a>
+  <form method="POST" action="/logout" class="inline-form"><button class="btn secondary sm">خروج</button></form>
+</nav>
+<% } %>
+<div class="container">
+<% if (msg) { %><div class="alert success"><%= msg %></div><% } %>
+<% if (err) { %><div class="alert error"><%= err %></div><% } %>

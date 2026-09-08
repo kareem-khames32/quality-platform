@@ -1,0 +1,25 @@
+{
+  "name": "call-quality-platform",
+  "version": "0.1.0",
+  "description": "Maharah Call Quality Platform - CDR ingest, speech-to-text, banned-words & complaint tickets",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning src/server.js",
+    "collect": "node --no-warnings=ExperimentalWarning src/cli.js collect",
+    "worker": "node --no-warnings=ExperimentalWarning src/cli.js worker",
+    "seed": "node --no-warnings=ExperimentalWarning src/cli.js seed"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "ejs": "^3.1.10",
+    "express": "^5.1.0",
+    "mssql": "^12.0.0",
+    "node-forge": "^1.4.0",
+    "nodemailer": "^9.1.1",
+    "zod": "^4.5.4"
+  }
+}

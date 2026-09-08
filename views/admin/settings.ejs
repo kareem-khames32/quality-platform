@@ -1,0 +1,138 @@
+<%- include('../partials/header', { title: 'الإعدادات' }) %>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">📏 قواعد التحويل التلقائي</div>
+    <form method="POST" action="/admin/settings">
+      <div class="field"><label><input type="checkbox" name="auto_transcribe" <%= settings.auto_transcribe ? 'checked' : '' %>> تفعيل التحويل التلقائي للمكالمات الجديدة المطابقة للقواعد</label></div>
+      <div class="field"><label><input type="checkbox" name="ingest_only_answered" <%= settings.ingest_only_answered ? 'checked' : '' %>> سحب المكالمات المردودة فقط (ANSWERED) من المستودعات</label></div>
+      <div class="row">
+        <div><label>أقل مدة مكالمة (ثانية)</label><input type="number" name="min_billsec" value="<%= settings.min_billsec %>" min="0"></div>
+        <div><label>أقصى مدة (0 = بلا حد)</label><input type="number" name="max_billsec" value="<%= settings.max_billsec %>" min="0"></div>
+        <div><label>نسبة العينة %</label><input type="number" name="sample_percent" value="<%= settings.sample_percent %>" min="0" max="100"></div>
+        <div><label>حد يومي للتحويل (0 = بلا حد)</label><input type="number" name="daily_cap" value="<%= settings.daily_cap %>" min="0"></div>
+      </div>
+      <div class="field"><label>السناترال المسموح بها (لا شيء = الكل)</label>
+        <select name="allowed_servers" multiple size="6"><% for (const s of servers) { %><option value="<%= s.server_name %>" <%= (settings.allowed_servers||[]).includes(s.server_name) ? 'selected' : '' %>><%= s.server_name %></option><% } %></select>
+        <% if (!servers.length) { %><span class="muted">هتظهر بعد أول سحب من المستودعات.</span><% } %>
+      </div>
+      <div class="card-title" style="margin-top:1rem">🧠 الذكاء الاصطناعي</div>
+      <div class="field"><label><input type="checkbox" name="llm_only_flagged" <%= settings.llm_only_flagged ? 'checked' : '' %>> تشغيل الـ AI فقط على المكالمات التي رُصدت فيها كلمات محظورة (توفير التكلفة). «أعد التحليل» اليدوي يشغّله دائماً.</label></div>
+      <div class="field"><label><input type="checkbox" name="llm_gate_tickets" <%= settings.llm_gate_tickets !== false ? 'checked' : '' %>> الـ AI هو اللي يقرر فتح التذكرة: الكلمات المحظورة لوحدها لا تفتح تذكرة إلا إذا أكد الـ AI وجود شكوى أو مخالفة من المحصل. التذاكر التلقائية اللي محدش لمسها بتتقفل لوحدها لو الـ AI قال المكالمة سليمة.</label></div>
+      <div class="field"><label>تعليمات إضافية للـ AI (سياسات الشركة، حالات مسموح بها، أمثلة على ما يُعدّ شكوى وما لا يُعدّ)</label>
+        <textarea name="llm_custom_prompt" rows="6" dir="rtl" placeholder="مثال:&#10;- عبارة «أسف على الإزعاج» من المحصل هي أدب وليست شكوى.&#10;- يُسمح للمحصل بذكر أن المديونية قد تُحوَّل للإدارة القانونية إذا قالها بأسلوب مهني بدون تهديد.&#10;- أي ذكر للترحيل أو الكفيل أو الأهل يُعدّ مخالفة عالية حتى لو بأسلوب هادئ."><%= settings.llm_custom_prompt || '' %></textarea>
+      </div>
+      <div class="card-title" style="margin-top:1rem">🎫 قواعد فتح التذاكر</div>
+      <div class="field"><label><input type="checkbox" name="ticket_on_complaint" <%= settings.ticket_on_complaint ? 'checked' : '' %>> فتح تذكرة تلقائياً عندما يكتشف التحليل شكوى</label></div>
+      <div class="row">
+        <div><label>الباسورد الافتراضي للمستخدمين الجدد وعند إعادة التعيين (8 أحرف على الأقل)</label><input type="text" name="default_password" dir="ltr" value="<%= settings.default_password || 'Maharah@123' %>"></div>
+      </div>
+      <div class="row">
+        <div><label>تسمية الموظف في النص</label><input type="text" name="role_agent" value="<%= settings.role_labels?.agent || 'المحصل' %>"></div>
+        <div><label>تسمية الطرف الآخر في النص</label><input type="text" name="role_customer" value="<%= settings.role_labels?.customer || 'العميل' %>"></div>
+      </div>
+      <div class="row">
+        <div><label>مهلة «تدخل فوري» (ساعات)</label><input type="number" name="sla_high" value="<%= settings.sla_hours?.high ?? 4 %>" min="1"></div>
+        <div><label>مهلة «متوسطة» (ساعات)</label><input type="number" name="sla_medium" value="<%= settings.sla_hours?.medium ?? 24 %>" min="1"></div>
+        <div><label>مهلة «منخفضة» (ساعات)</label><input type="number" name="sla_low" value="<%= settings.sla_hours?.low ?? 72 %>" min="1"></div>
+      </div>
+      <div class="row">
+        <div><label>فتح تذكرة عند كلمة محظورة بخطورة ≥</label><select name="ticket_on_banned_min_severity"><% for (const s of ['low','medium','high']) { %><option value="<%= s %>" <%= settings.ticket_on_banned_min_severity===s?'selected':'' %>><%= s %></option><% } %></select></div>
+        <div><label>الشركة الافتراضية للتذاكر غير المصنفة</label><select name="default_company_id"><option value="">—</option><% for (const c of companies) { %><option value="<%= c.id %>" <%= settings.default_company_id===c.id?'selected':'' %>><%= c.name %></option><% } %></select></div>
+      </div>
+      <button class="btn">حفظ القواعد</button>
+    </form>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:1rem">
+      <form method="POST" action="/admin/collect-now"><button class="btn secondary">🔄 اسحب من المستودعات الآن</button></form>
+      <form method="POST" action="/admin/apply-rules" onsubmit="return confirm('إضافة كل مكالمات اليوم المطابقة للقواعد لقائمة التحويل؟ (بتكلفة STT)')"><button class="btn secondary">⚡ طبّق القواعد على مكالمات اليوم</button></form>
+      <form method="POST" action="/admin/reanalyze-flagged" onsubmit="return confirm('إعادة تحليل مكالمات اليوم المعلّمة بكلمات محظورة بالـ AI؟ التذاكر الخاطئة اللي محدش لمسها هتتقفل تلقائياً.')"><button class="btn secondary" <%= providers.llm ? '' : 'disabled' %>>🧠 أعد تحليل مكالمات اليوم المعلّمة بالـ AI</button></form>
+      <form method="POST" action="/admin/review-open-tickets" onsubmit="return confirm('مراجعة كل التذاكر المفتوحة اللي محدش لمسها بمعيار الـ AI الحالي؟ اللي مالهاش لازمة هتتقفل تلقائياً.')"><button class="btn secondary" <%= providers.llm ? '' : 'disabled' %>>🧹 راجع التذاكر المفتوحة بالـ AI</button></form>
+    </div>
+    <p class="muted" style="margin-top:.5rem">القواعد بتتطبق تلقائياً على كل مكالمة جديدة وقت سحبها. الزرار ده بيطبّقها بأثر رجعي على مكالمات اليوم اللي لسه «جديدة».</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔌 المزودون</div>
+    <form method="POST" action="/admin/providers">
+      <b>البوابة (callsearch-gateway)</b>
+      <div class="row">
+        <div><label>العنوان</label><input type="url" name="gw_base_url" value="<%= cfg.gateway.base_url %>"></div>
+        <div><label>اسم هيدر المفتاح</label><input type="text" name="gw_header" value="<%= cfg.gateway.api_key_header %>"></div>
+      </div>
+      <div class="row">
+        <div><label>مفتاح API <%= cfg.gateway.api_key ? '(مضبوط — اتركه فارغاً للإبقاء)' : '(غير مضبوط)' %></label><input type="password" name="gw_api_key" autocomplete="new-password"></div>
+        <div style="flex:0;white-space:nowrap"><label><input type="checkbox" name="gw_insecure" <%= cfg.gateway.insecure_tls ? 'checked' : '' %>> تجاهل شهادة TLS</label></div>
+      </div>
+      <b style="display:block;margin-top:1rem">تحويل الصوت لنص (STT)</b>
+      <div class="row">
+        <div><label>المزود</label><select name="stt_provider"><% for (const p of ['mock','soniox','deepgram','openai_compatible','elevenlabs','custom_http']) { %><option value="<%= p %>" <%= cfg.stt.provider===p?'selected':'' %>><%= p %></option><% } %></select></div>
+        <div><label>الموديل</label><input type="text" name="stt_model" value="<%= cfg.stt.model %>"></div>
+        <div><label>اللغة</label><input type="text" name="stt_language" value="<%= cfg.stt.language %>"></div>
+      </div>
+      <div class="row">
+        <div><label>Base URL</label><input type="text" name="stt_base_url" value="<%= cfg.stt.base_url %>"></div>
+        <div><label>مفتاح API <%= cfg.stt.api_key ? '(مضبوط)' : '' %></label><input type="password" name="stt_api_key" autocomplete="new-password"></div>
+      </div>
+      <div class="row">
+        <div><label>custom_http: URL</label><input type="text" name="stt_custom_url" value="<%= cfg.stt.custom?.url || '' %>"></div>
+        <div><label>custom_http: مسار النص في الرد</label><input type="text" name="stt_text_path" value="<%= cfg.stt.custom?.text_path || 'text' %>"></div>
+      </div>
+      <b style="display:block;margin-top:1rem">التحليل (LLM)</b>
+      <div class="row">
+        <div><label>المزود</label><select name="llm_provider"><% for (const p of ['keywords_only','anthropic','custom_http']) { %><option value="<%= p %>" <%= cfg.llm.provider===p?'selected':'' %>><%= p %></option><% } %></select></div>
+        <div><label>الموديل</label><input type="text" name="llm_model" value="<%= cfg.llm.model %>"></div>
+        <div><label>الجهد (anthropic)</label><select name="llm_effort"><% for (const e of ['low','medium','high']) { %><option value="<%= e %>" <%= cfg.llm.effort===e?'selected':'' %>><%= e %></option><% } %></select></div>
+      </div>
+      <div class="row">
+        <div><label>Base URL (custom_http)</label><input type="text" name="llm_base_url" value="<%= cfg.llm.base_url || '' %>"></div>
+        <div><label>مفتاح API <%= cfg.llm.api_key ? '(مضبوط)' : '' %></label><input type="password" name="llm_api_key" autocomplete="new-password"></div>
+      </div>
+      <b style="display:block;margin-top:1rem">البريد (SMTP داخلي / Outlook)</b>
+      <div class="row">
+        <div style="flex:0;white-space:nowrap"><label><input type="checkbox" name="smtp_enabled" <%= cfg.smtp?.enabled ? 'checked' : '' %>> تفعيل إرسال الإيميلات</label></div>
+        <div><label>السيرفر (host)</label><input type="text" name="smtp_host" dir="ltr" value="<%= cfg.smtp?.host || '' %>" placeholder="mail.maharah.local"></div>
+        <div><label>البورت</label><input type="number" name="smtp_port" value="<%= cfg.smtp?.port || 25 %>"></div>
+      </div>
+      <div class="row">
+        <div><label>المستخدم (اختياري)</label><input type="text" name="smtp_user" dir="ltr" value="<%= cfg.smtp?.user || '' %>"></div>
+        <div><label>كلمة المرور <%= cfg.smtp?.pass ? '(مضبوطة)' : '' %></label><input type="password" name="smtp_pass" autocomplete="new-password"></div>
+        <div><label>المرسل (From)</label><input type="text" name="smtp_from" dir="ltr" value="<%= cfg.smtp?.from || '' %>" placeholder="callquality@maharah.com"></div>
+      </div>
+      <div class="row">
+        <div style="flex:0;white-space:nowrap"><label><input type="checkbox" name="smtp_secure" <%= cfg.smtp?.secure ? 'checked' : '' %>> SSL (بورت 465)</label></div>
+        <div style="flex:0;white-space:nowrap"><label><input type="checkbox" name="smtp_ignore_tls" <%= cfg.smtp?.ignore_tls ? 'checked' : '' %>> بدون STARTTLS</label></div>
+        <div><label>رابط المنصة في الإيميلات</label><input type="text" name="public_url" dir="ltr" value="<%= cfg.server?.public_url || '' %>" placeholder="http://10.23.200.44:8090"></div>
+      </div>
+      <b style="display:block;margin-top:1rem">التشغيل</b>
+      <div class="row">
+        <div><label>فترة السحب (ثانية)</label><input type="number" name="collect_interval" value="<%= cfg.collector.interval_sec %>" min="30"></div>
+        <div><label>عدد التحويلات المتوازية</label><input type="number" name="worker_conc" value="<%= cfg.worker.concurrency %>" min="1" max="20"></div>
+      </div>
+      <button class="btn" style="margin-top:.5rem">حفظ المزودين</button>
+    </form>
+    <form method="POST" action="/admin/test-mail" class="row" style="margin-top:1rem;align-items:flex-end">
+      <div><label>اختبار الإيميل: أرسل رسالة تجريبية إلى</label><input type="text" name="to" dir="ltr" placeholder="you@maharah.com" value="<%= user.email || '' %>"></div>
+      <div style="flex:0"><button class="btn secondary" <%= providers.smtp ? '' : 'disabled title="فعّل SMTP واحفظ أولاً"' %>>📧 إرسال اختبار</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">🩺 الحالة الحية <button class="btn secondary sm" onclick="loadHealth()">تحديث</button></div>
+  <div id="health" class="muted">اضغط تحديث…</div>
+</div>
+<script>
+async function loadHealth(){
+  const el=document.getElementById('health'); el.textContent='جاري الفحص…';
+  try{ const h=await (await fetch('/admin/health')).json();
+    let html='<table><tr><th>المكوّن</th><th>الحالة</th><th>تفاصيل</th></tr>';
+    for(const w of h.warehouses){ html+=`<tr><td>${w.name} <span class="muted">${w.host}</span></td><td>${w.ok?'<span class="badge green">متصل '+w.ms+'ms</span>':'<span class="badge red">فشل</span>'}</td><td class="muted">${w.ok?w.servers.map(s=>s.server_name+' ('+new Date(s.last_sync_at).toLocaleString('en-GB')+')').join('، '):w.error}</td></tr>`; }
+    const src = h.gateway.source==='gateway' ? 'عبر البوابة (API key)' : 'مباشر من سيرفرات الفروع';
+    const br = (h.gateway.branches||[]).map(b=>`<span class="badge ${b.ok===false?'red':'green'}" title="${b.url||''}">${b.name||b.id}${b.ms?' '+b.ms+'ms':''}</span>`).join(' ');
+    html+=`<tr><td>التسجيلات <span class="muted">${src}</span></td><td>${h.gateway.ok?'<span class="badge green">متصل</span>':'<span class="badge red">فشل</span>'}</td><td>${br || (h.gateway.error||'')}</td></tr>`;
+    html+=`<tr><td>STT</td><td>${h.stt?'<span class="badge green">جاهز</span>':'<span class="badge red">غير مضبوط</span>'}</td><td></td></tr>`;
+    html+=`<tr><td>LLM</td><td>${h.llm?'<span class="badge green">جاهز</span>':'<span class="badge gray">كلمات محظورة فقط</span>'}</td><td></td></tr></table>`;
+    el.innerHTML=html;
+  }catch(e){ el.textContent='خطأ: '+e.message; }
+}
+</script>
+<%- include('../partials/footer') %>

@@ -1,0 +1,71 @@
+<%- include('partials/header', { title: 'اللوحة' }) %>
+<% const st = byStatus; const pending = (st.queued||0)+(st.transcribing||0)+(st.analyzing||0); %>
+<div class="grid grid-4" style="margin-bottom:1.25rem">
+  <div class="stat"><div class="label">مكالمات مسجّلة في المنصة</div><div class="value"><%= Object.values(st).reduce((a,b)=>a+b,0).toLocaleString('en') %></div></div>
+  <div class="stat"><div class="label">تم تحليلها</div><div class="value" style="color:var(--green)"><%= (st.analyzed||0).toLocaleString('en') %></div></div>
+  <div class="stat"><div class="label">في انتظار التحويل / التحليل</div><div class="value" style="color:var(--amber)"><%= pending.toLocaleString('en') %></div></div>
+  <div class="stat"><div class="label">شكاوى مفتوحة</div><div class="value" style="color:var(--red)"><%= ((tickets.open||0)+(tickets.in_progress||0)).toLocaleString('en') %></div><div class="muted">تم الحل: <%= tickets.resolved||0 %> · مغلقة: <%= tickets.closed||0 %></div></div>
+</div>
+
+<% if (!providers.gateway || !providers.stt) { %>
+<div class="alert info">
+  ⚠️ المنصة بتجمع المكالمات، لكن
+  <% if (!providers.gateway) { %>مفيش وصول للتسجيلات: لا مفتاح API للبوابة ولا ملف config.ini بتاع الفروع (مش هينفع نسمع أو نحوّل).<% } %>
+  <% if (!providers.stt) { %> مزود تحويل الصوت لنص غير مضبوط.<% } %>
+  <% if (user.role === 'admin') { %><a href="/admin/settings">اضبط الإعدادات</a><% } %>
+</div>
+<% } %>
+<% if (!settings.auto_transcribe) { %><div class="alert info">التحويل التلقائي متوقف. المكالمات بتتحول يدوياً فقط من زرار «حوّل لنص». <% if (user.role === 'admin') { %><a href="/admin/settings">تفعيل القواعد</a><% } %></div><% } %>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">📈 آخر 14 يوم</div>
+    <div class="table-wrap"><table>
+      <tr><th>اليوم</th><th>مكالمات</th><th>محلّلة</th><th>معلّقة</th><th style="width:40%"></th></tr>
+      <% const mx = Math.max(1, ...days.map(d=>d.calls)); for (const d of days.slice().reverse()) { %>
+      <tr><td><a href="/calls?from=<%= d.d %>&to=<%= d.d %>" class="dt"><%= d.d %></a></td><td><%= d.calls %></td><td><%= d.analyzed %></td><td><%= d.pending %></td>
+      <td><div class="bar"><div style="width:<%= Math.round(d.calls/mx*100) %>%"></div></div></td></tr>
+      <% } if (!days.length) { %><tr><td colspan="5" class="muted">لا توجد بيانات بعد. الـ collector بيسحب أول دفعة خلال دقيقة من التشغيل.</td></tr><% } %>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🎫 آخر الشكاوى</div>
+    <% if (!recentTickets.length) { %><p class="muted">لا توجد شكاوى بعد.</p><% } %>
+    <table>
+      <% for (const t of recentTickets) { %>
+      <tr><td><a href="/tickets/<%= t.id %>">#<%= t.id %></a></td><td><%= t.title %></td><td><span class="chip <%= t.severity %>"><%= t.severity %></span></td><td><%= t.company_name || '—' %></td><td><span class="badge <%= t.status==='open'?'red':t.status==='in_progress'?'amber':'green' %>"><%= TICKET_AR[t.status] %></span></td></tr>
+      <% } %>
+    </table>
+    <% if (topAgents.length) { %>
+    <div class="card-title" style="margin-top:1.25rem">👤 أكثر الموظفين شكاوى (30 يوم)</div>
+    <table><% for (const a of topAgents) { %><tr><td><%= a.agent %></td><td><span class="badge red"><%= a.c %></span></td></tr><% } %></table>
+    <% } %>
+  </div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">🏢 السناترال</div>
+    <div class="table-wrap"><table>
+      <tr><th>المستودع</th><th>السنترال</th><th>مكالمات</th><th>محلّلة</th><th>آخر مكالمة</th></tr>
+      <% for (const s of byServer) { %>
+      <tr><td><%= s.warehouse %></td><td><a href="/calls?server=<%= s.server_name %>&from="><%= s.server_name %></a></td><td><%= s.calls %></td><td><%= s.analyzed %></td><td class="muted"><span class="dt"><%= s.last_call %></span></td></tr>
+      <% } %>
+    </table></div>
+  </div>
+  <div class="card">
+    <div class="card-title">🔄 حالة السحب من المستودعات</div>
+    <table>
+      <tr><th>المستودع</th><th>آخر ID</th><th>آخر سحب</th><th>آخر دفعة</th><th>خطأ</th></tr>
+      <% for (const w of wm) { %><tr><td><%= w.warehouse %></td><td><%= w.last_id %></td><td class="muted"><span class="dt"><%= w.last_sync_at %></span></td><td><%= w.last_count %></td><td class="muted" style="color:var(--red)"><%= w.last_error || '' %></td></tr><% } %>
+      <% if (!wm.length) { %><tr><td colspan="5" class="muted">لم يتم السحب بعد.</td></tr><% } %>
+    </table>
+    <% if (usage.length) { %>
+    <div class="card-title" style="margin-top:1.25rem">💸 الاستهلاك (7 أيام)</div>
+    <table><tr><th>اليوم</th><th>النوع</th><th>عدد</th><th>دقائق صوت</th></tr>
+      <% for (const u of usage) { %><tr><td><%= u.day %></td><td><%= u.kind %></td><td><%= u.count %></td><td><%= Math.round(u.seconds/60) %></td></tr><% } %></table>
+    <% } %>
+  </div>
+</div>
+<%- include('partials/footer') %>

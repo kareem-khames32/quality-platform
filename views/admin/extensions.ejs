@@ -1,0 +1,40 @@
+<%- include('../partials/header', { title: 'التحويلات' }) %>
+<p style="margin-bottom:1rem"><a class="btn secondary sm" href="/admin/companies">🏢 الشركات</a> <a class="btn secondary sm" href="/admin/servers">🖥 السناترال</a> <a class="btn secondary sm" href="/admin/extensions">☎️ التحويلات</a></p>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">➕ تحويلة</div>
+    <form method="POST" action="/admin/extensions" class="row">
+      <div><label>التحويلة</label><input type="text" name="ext" required></div>
+      <div><label>اسم الموظف</label><input type="text" name="agent_name"></div>
+      <div><label>الشركة</label><select name="company_id"><option value="">—</option><% for (const c of companies) { %><option value="<%= c.id %>"><%= c.name %></option><% } %></select></div>
+      <div><label>القسم</label><input type="text" name="department"></div>
+      <div><label>السنترال (* = الكل)</label><input type="text" name="server_name" value="*"></div>
+      <div style="flex:0"><button class="btn">حفظ</button></div>
+    </form>
+    <details style="margin-top:1rem"><summary class="btn secondary sm">📥 استيراد من Excel / CSV</summary>
+      <form method="POST" action="/admin/extensions" style="margin-top:.75rem">
+        <div class="field"><label>سطر لكل تحويلة: التحويلة, اسم الموظف, الشركة, القسم, السنترال (اختياري)</label><textarea name="bulk" rows="8" placeholder="101975, bayan mohamed, مهارة القاهرة, مبيعات&#10;200732, othman mohamed, مهارة النصر, خدمة عملاء"></textarea></div>
+        <button class="btn secondary">استيراد</button>
+      </form>
+    </details>
+  </div>
+  <div class="card">
+    <div class="card-title">🔍 تحويلات ظهرت في المكالمات وغير مسجلة (30 يوم)</div>
+    <div class="table-wrap" style="max-height:420px;overflow:auto"><table>
+      <tr><th>التحويلة</th><th>الاسم من السنترال</th><th>السنترال</th><th>مكالمات</th></tr>
+      <% for (const s of seen) { %><tr><td><b><%= s.ext %></b></td><td><%= s.agent_name || '—' %></td><td class="muted"><%= s.server_name %></td><td><%= s.calls %></td></tr><% } %>
+      <% if (!seen.length) { %><tr><td colspan="4" class="muted">لا شيء.</td></tr><% } %>
+    </table></div>
+  </div>
+</div>
+<div class="card">
+  <div class="card-title">☎️ التحويلات المسجلة <span class="badge"><%= rows.length %></span></div>
+  <div class="table-wrap"><table>
+    <tr><th>التحويلة</th><th>الموظف</th><th>الشركة</th><th>القسم</th><th>السنترال</th><th></th></tr>
+    <% for (const r of rows) { %>
+    <tr><td><b><%= r.ext %></b></td><td><%= r.agent_name || '—' %></td><td><%= r.company_name || '—' %></td><td><%= r.department || '—' %></td><td class="muted"><%= r.server_name %></td>
+      <td><form method="POST" action="/admin/extensions/delete" class="inline-form"><input type="hidden" name="ext" value="<%= r.ext %>"><input type="hidden" name="server_name" value="<%= r.server_name %>"><button class="btn danger sm">حذف</button></form></td></tr>
+    <% } %>
+  </table></div>
+</div>
+<%- include('../partials/footer') %>

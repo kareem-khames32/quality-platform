@@ -1,0 +1,67 @@
+<%- include('../partials/header', { title: 'الشركات' }) %>
+<p style="margin-bottom:1rem"><a class="btn secondary sm" href="/admin/companies">🏢 الشركات</a> <a class="btn secondary sm" href="/admin/servers">🖥 السناترال</a> <a class="btn secondary sm" href="/admin/extensions">☎️ التحويلات</a></p>
+
+<%
+function chainEditor(action, chain) { %>
+  <form method="POST" action="<%= action %>" class="chain-form">
+    <label>سلسلة التصعيد بالترتيب (التذكرة تبدأ عند 1، وكل شخص يغلق خطوته لتنتقل للتالي)</label>
+    <div class="chain-steps" style="display:flex;flex-direction:column;gap:.4rem;margin:.4rem 0">
+      <% for (let i = 0; i < Math.max(chain.length + 1, 3); i++) { const sel = chain[i]?.user_id || ''; %>
+      <div class="row" style="align-items:center"><span class="badge" style="flex:0">خطوة <%= i + 1 %></span>
+        <select name="user_ids"><option value="">— لا أحد —</option><% for (const u of users) { %><option value="<%= u.id %>" <%= sel === u.id ? 'selected' : '' %>><%= u.full_name || u.username %> (<%= u.role %>)</option><% } %></select></div>
+      <% } %>
+    </div>
+    <button type="button" class="btn secondary sm" onclick="addStep(this)">➕ خطوة أخرى</button>
+    <button class="btn sm">حفظ السلسلة</button>
+  </form>
+<% } %>
+
+<div class="card">
+  <div class="card-title">➕ شركة / جهة جديدة</div>
+  <form method="POST" action="/admin/companies" class="row">
+    <div><label>الاسم</label><input type="text" name="name" required></div>
+    <div><label>ملاحظات</label><input type="text" name="notes"></div>
+    <div style="flex:0"><button class="btn">إضافة</button></div>
+  </form>
+  <p class="muted" style="margin-top:.5rem">التذكرة بتتوجّه للشركة حسب تحويلة الموظف (صفحة التحويلات) أو السنترال (صفحة السناترال)، وبعدين تمشي على سلسلة التصعيد بتاعة الشركة دي خطوة خطوة.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">🪜 السلسلة الافتراضية <span class="muted">(للتذاكر اللي شركتها غير محددة أو مالهاش سلسلة)</span></div>
+  <% chainEditor('/admin/companies/0/chain', defaultChain) %>
+</div>
+
+<% for (const c of companies) { %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between"><span>🏢 <%= c.name %> <% if (c.open_tickets) { %><span class="badge red"><%= c.open_tickets %> مفتوحة</span><% } %></span>
+    <form method="POST" action="/admin/companies/<%= c.id %>/delete" class="inline-form" onsubmit="return confirm('حذف الشركة؟ التذاكر ستبقى بدون شركة.')"><button class="btn danger sm">حذف</button></form></div>
+  <% if (c.notes) { %><p class="muted"><%= c.notes %></p><% } %>
+  <div class="grid grid-2">
+    <div><% chainEditor('/admin/companies/' + c.id + '/chain', c.chain) %></div>
+    <div>
+      <form method="POST" action="/admin/companies/<%= c.id %>/members">
+        <label>مشاهدون إضافيون (يشوفوا تذاكر الشركة من غير ما يكونوا في السلسلة)</label>
+        <div style="display:flex;flex-wrap:wrap;gap:.5rem .9rem;margin:.4rem 0 .6rem">
+          <% for (const u of users) { const on = c.members.some(m => m.id === u.id); %>
+          <label style="display:inline-flex;align-items:center;gap:.3rem;font-weight:500;color:var(--text)"><input type="checkbox" name="user_ids" value="<%= u.id %>" <%= on ? 'checked' : '' %>> <%= u.full_name || u.username %></label>
+          <% } %>
+        </div>
+        <button class="btn secondary sm">حفظ المشاهدين</button>
+      </form>
+      <form method="POST" action="/admin/companies/<%= c.id %>/emails" style="margin-top:1rem">
+        <label>إيميلات إضافية تستلم تذاكر الشركة (افصل بفاصلة)</label>
+        <div class="row"><input type="text" name="notify_emails" dir="ltr" value="<%= c.notify_emails || '' %>" placeholder="quality@maharah.com, manager@maharah.com"><button class="btn secondary sm" style="flex:0">حفظ</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+<% } %>
+<script>
+function addStep(btn) {
+  const form = btn.closest('form'); const steps = form.querySelector('.chain-steps');
+  const n = steps.children.length + 1; const first = steps.children[0];
+  const clone = first.cloneNode(true); clone.querySelector('.badge').textContent = 'خطوة ' + n; clone.querySelector('select').value = '';
+  steps.appendChild(clone);
+}
+</script>
+<%- include('../partials/footer') %>

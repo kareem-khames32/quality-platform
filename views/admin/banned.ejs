@@ -1,0 +1,40 @@
+<%- include('../partials/header', { title: 'الكلمات المحظورة' }) %>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">➕ إضافة كلمة</div>
+    <form method="POST" action="/admin/banned" class="row">
+      <div><label>الكلمة أو العبارة</label><input type="text" name="word" required></div>
+      <div><label>التصنيف</label><input type="text" name="category" placeholder="شكاوى / إساءة / سلوك" list="cats"><datalist id="cats"><% for (const c of [...new Set(words.map(w=>w.category))]) { %><option value="<%= c %>"><% } %></datalist></div>
+      <div><label>الخطورة</label><select name="severity"><option value="low">منخفضة</option><option value="medium" selected>متوسطة</option><option value="high">عالية</option></select></div>
+      <div style="flex:0"><button class="btn">إضافة</button></div>
+    </form>
+    <details style="margin-top:1rem"><summary class="btn secondary sm">📥 استيراد دفعة</summary>
+      <form method="POST" action="/admin/banned/import" style="margin-top:.75rem">
+        <div class="field"><label>سطر لكل كلمة: الكلمة, التصنيف, الخطورة (low/medium/high)</label><textarea name="bulk" rows="6" placeholder="نصب, اتهامات, high&#10;براحتك, سلوك, low"></textarea></div>
+        <button class="btn secondary">استيراد</button>
+      </form>
+    </details>
+  </div>
+  <div class="card">
+    <div class="card-title">🧪 اختبار نص</div>
+    <form method="POST" action="/admin/banned/test">
+      <div class="field"><textarea name="text" rows="5" placeholder="الصق أي نص لاختبار المطابقة (المطابقة تتجاهل التشكيل والهمزات)"><%= test ? test.text : '' %></textarea></div>
+      <button class="btn secondary">اختبر</button>
+    </form>
+    <% if (test) { %><p style="margin-top:.75rem"><% if (!test.hits.length) { %><span class="muted">لا توجد كلمات محظورة.</span><% } for (const h of test.hits) { %><span class="chip <%= h.severity %>" title="<%= h.context %>"><%= h.word %> ×<%= h.count %></span><% } %></p><% } %>
+  </div>
+</div>
+<div class="card">
+  <div class="card-title">🚫 القائمة <span class="badge"><%= words.length %></span></div>
+  <div class="table-wrap"><table>
+    <tr><th>الكلمة</th><th>التصنيف</th><th>الخطورة</th><th>مفعّلة</th><th></th></tr>
+    <% for (const w of words) { %>
+    <tr style="<%= w.active ? '' : 'opacity:.5' %>">
+      <td><b><%= w.word %></b></td><td><%= w.category %></td><td><span class="chip <%= w.severity %>"><%= w.severity %></span></td>
+      <td><form method="POST" action="/admin/banned/<%= w.id %>/toggle" class="inline-form"><button class="btn secondary sm"><%= w.active ? '✔ مفعّلة' : '✖ معطّلة' %></button></form></td>
+      <td><form method="POST" action="/admin/banned/<%= w.id %>/delete" class="inline-form" onsubmit="return confirm('حذف الكلمة؟')"><button class="btn danger sm">حذف</button></form></td>
+    </tr>
+    <% } %>
+  </table></div>
+</div>
+<%- include('../partials/footer') %>

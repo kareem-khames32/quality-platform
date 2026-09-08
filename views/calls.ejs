@@ -1,0 +1,114 @@
+<%- include('partials/header', { title: 'المكالمات' }) %>
+<div class="card">
+  <form method="GET" action="/calls" class="row">
+    <div><label>المستودع</label><select name="warehouse"><option value="">الكل</option><% for (const w of warehouses) { %><option value="<%= w.id %>" <%= qs.warehouse===w.id?'selected':'' %>><%= w.name %></option><% } %></select></div>
+    <div><label>السنترال</label><select name="server"><option value="">الكل</option><% for (const s of servers) { %><option value="<%= s.server_name %>" <%= qs.server===s.server_name?'selected':'' %>><%= s.server_name %></option><% } %></select></div>
+    <div><label>رقم العميل</label><input type="text" name="phone" value="<%= qs.phone||'' %>" placeholder="05xxxxxxxx"></div>
+    <div><label>التحويلة</label><input type="text" name="ext" value="<%= qs.ext||'' %>"></div>
+    <div><label>اسم الموظف</label><input type="text" name="agent" value="<%= qs.agent||'' %>"></div>
+    <div><label>من</label><input type="date" name="from" value="<%= qs.from||'' %>"></div>
+    <div><label>إلى</label><input type="date" name="to" value="<%= qs.to||'' %>"></div>
+    <div><label>أطول من (ثانية)</label><input type="number" name="min" value="<%= qs.min||'' %>" min="0"></div>
+    <div><label>الحالة</label><select name="status"><option value="">الكل</option><% for (const [k,v] of Object.entries(STATUS_AR)) { %><option value="<%= k %>" <%= qs.status===k?'selected':'' %>><%= v %></option><% } %></select></div>
+    <div><label>تصفية</label><select name="flag"><option value="">—</option><option value="complaint" <%= qs.flag==='complaint'?'selected':'' %>>فيها شكوى</option><option value="banned" <%= qs.flag==='banned'?'selected':'' %>>فيها كلمات محظورة</option><option value="ticket" <%= qs.flag==='ticket'?'selected':'' %>>لها تذكرة</option></select></div>
+    <div><label>ترتيب</label><select name="sort"><option value="recent" <%= qs.sort!=='duration'?'selected':'' %>>الأحدث</option><option value="duration" <%= qs.sort==='duration'?'selected':'' %>>الأطول</option></select></div>
+    <div style="flex:0"><button class="btn">بحث</button></div>
+  </form>
+</div>
+
+<form method="POST" action="/calls/bulk" id="bulk">
+<div class="card">
+  <div class="card-title" style="justify-content:space-between">
+    <span>📞 النتائج <span class="badge"><%= total.toLocaleString('en') %></span></span>
+    <span><button class="btn sm" name="action" value="transcribe" onclick="return confirm('تحويل المكالمات المحددة لنص؟')">🎙 حوّل المحدد لنص</button></span>
+  </div>
+  <div class="table-wrap"><table>
+    <tr><th><input type="checkbox" onclick="document.querySelectorAll('.ck').forEach(c=>c.checked=this.checked)"></th><th>التاريخ</th><th>السنترال</th><th>الموظف</th><th>التحويلة</th><th>رقم العميل</th><th>المدة</th><th style="min-width:270px">التسجيل</th><th>الحالة</th><th>التحليل</th><th></th></tr>
+    <% for (const r of rows) { const names = (r.listeners||'').split(',').filter(Boolean); %>
+    <tr id="row<%= r.id %>">
+      <td><input class="ck" type="checkbox" name="ids" value="<%= r.id %>"></td>
+      <td class="nowrap"><a href="/calls/<%= r.id %>"><span class="dt"><%= r.calldate %></span></a></td>
+      <td class="muted nowrap"><%= r.server_name %></td>
+      <td><%= r.agent_name || '—' %></td>
+      <td><%= r.agent_ext || '—' %></td>
+      <td dir="ltr" style="text-align:right"><%= r.phone || r.dst_raw %></td>
+      <td><%= fmtDuration(r.billsec) %></td>
+      <td>
+        <div class="mini-player">
+          <button type="button" class="btn secondary sm play-btn" onclick="playRow(<%= r.id %>, this)" title="تشغيل التسجيل هنا">▶</button>
+          <span class="mini-slot"></span>
+        </div>
+        <div class="muted listen-info" style="font-size:.75rem;margin-top:.15rem">
+          <% if (r.listen_count) { %>🎧 سُمعت <%= r.listen_count %> · <span title="<%= names.join('، ') %>"><%= names.slice(0,2).join('، ') %><%= names.length > 2 ? ' +' + (names.length - 2) : '' %></span><% } else { %>لم تُسمع بعد<% } %>
+        </div>
+      </td>
+      <td><span class="badge <%= r.status==='analyzed'?'green':r.status==='failed'?'red':r.status==='new'?'gray':'amber' %>" title="<%= r.error||r.skip_reason||'' %>"><%= STATUS_AR[r.status] %></span></td>
+      <td>
+        <% if (r.is_complaint) { %><span class="chip">شكوى</span><% } %>
+        <% if (r.hits) { %><span class="chip medium">🚫 <%= r.hits %></span><% } %>
+        <% if (r.quality_score != null) { %><span class="badge <%= r.quality_score>=70?'green':r.quality_score>=40?'amber':'red' %>"><%= r.quality_score %></span><% } %>
+        <% if (r.ticket_id) { %><a href="/tickets/<%= r.ticket_id %>" class="badge blue">🎫 #<%= r.ticket_id %></a><% } %>
+      </td>
+      <td><a class="btn secondary sm" href="/calls/<%= r.id %>">فتح</a></td>
+    </tr>
+    <% } if (!rows.length) { %><tr><td colspan="11" class="muted">لا توجد مكالمات مطابقة.</td></tr><% } %>
+  </table></div>
+  <% const pages = Math.ceil(total/per); if (pages > 1) { const base = new URLSearchParams(qs); %>
+  <div class="pagination">
+    <% for (let p = Math.max(1,page-4); p <= Math.min(pages,page+4); p++) { base.set('page', p); %>
+      <% if (p===page) { %><span class="cur"><%= p %></span><% } else { %><a href="/calls?<%= base.toString() %>"><%= p %></a><% } %>
+    <% } %>
+    <span class="muted"><%= pages %> صفحة</span>
+  </div>
+  <% } %>
+</div>
+</form>
+<script>
+// One shared <audio> element moves between rows: ▶ on a row loads and plays that recording inline.
+let currentAudio = null, currentBtn = null;
+async function playRow(id, btn) {
+  if (currentBtn === btn && currentAudio) { currentAudio.paused ? currentAudio.play() : currentAudio.pause(); return; }
+  if (currentAudio) { currentAudio.pause(); currentAudio.remove(); if (currentBtn) currentBtn.textContent = '▶'; }
+  const slot = btn.parentElement.querySelector('.mini-slot');
+  slot.innerHTML = '<span class="muted">⏳ جاري تحديد التسجيل…</span>';
+  btn.disabled = true;
+  try {
+    // probe first so the user gets the real reason when a recording is not (yet) available on the branch
+    const probe = await fetch('/calls/' + id + '/audio', { headers: { Range: 'bytes=0-0' } });
+    if (probe.status >= 400) { slot.innerHTML = '<span class="muted" style="color:var(--red)">' + (await probe.text()).slice(0, 160) + '</span>'; return; }
+  } catch (e) { slot.innerHTML = '<span class="muted" style="color:var(--red)">تعذر الاتصال بالسيرفر</span>'; return; }
+  finally { btn.disabled = false; }
+  const a = document.createElement('audio');
+  a.controls = true; a.preload = 'none'; a.src = '/calls/' + id + '/audio';
+  a.style.cssText = 'width:220px;height:32px;margin:0;vertical-align:middle';
+  a.addEventListener('play', () => { btn.textContent = '⏸'; markListened(btn); });
+  a.addEventListener('pause', () => { btn.textContent = '▶'; });
+  a.addEventListener('error', () => { slot.insertAdjacentHTML('beforeend', '<div class="muted" style="color:var(--red)">تعذر جلب التسجيل</div>'); });
+  slot.innerHTML = ''; slot.appendChild(a);
+  currentAudio = a; currentBtn = btn;
+  a.play().catch(() => {});
+}
+// Live status: rows that are queued/working get their badge refreshed from /api/queue.json (header widget polls it every 5s).
+const pendingIds = [<%= rows.filter(r => ['queued','transcribing','analyzing','transcribed'].includes(r.status)).map(r => r.id).join(',') %>];
+if (pendingIds.length) {
+  (async function pollRows(){
+    try {
+      const j = await (await fetch('/api/queue.json?ids=' + pendingIds.join(','))).json();
+      for (const c of j.calls) {
+        const row = document.getElementById('row' + c.id); if (!row) continue;
+        const badge = row.querySelector('.badge'); if (!badge) continue;
+        badge.textContent = j.labels[c.status] || c.status;
+        badge.className = 'badge ' + (c.status === 'analyzed' ? 'green' : c.status === 'failed' ? 'red' : c.status === 'new' ? 'gray' : 'amber');
+        if (c.error) badge.title = c.error;
+        if (['analyzed','failed'].includes(c.status)) { const i = pendingIds.indexOf(c.id); if (i >= 0) pendingIds.splice(i, 1); if (c.status === 'analyzed') row.style.background = '#f0fdf4'; }
+      }
+    } catch (e) {}
+    if (pendingIds.length) setTimeout(pollRows, 4000);
+  })();
+}
+function markListened(btn) {
+  const info = btn.closest('td').querySelector('.listen-info');
+  if (info && info.textContent.includes('لم تُسمع')) info.textContent = '🎧 سُمعت الآن · <%= user.full_name || user.username %>';
+}
+</script>
+<%- include('partials/footer') %>

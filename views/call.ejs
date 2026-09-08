@@ -1,0 +1,107 @@
+<%- include('partials/header', { title: 'مكالمة ' + call.id }) %>
+<% function highlight(text, hits) { let out = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); for (const h of (hits||[])) { const w = h.word.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); out = out.replace(new RegExp(w,'g'), m => '<mark>'+m+'</mark>'); } return out; } %>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">📞 بيانات المكالمة <span class="badge <%= call.status==='analyzed'?'green':call.status==='failed'?'red':'amber' %>"><%= STATUS_AR[call.status] %></span></div>
+    <div class="kv">
+      <b>التاريخ</b><span><span class="dt"><%= call.calldate %></span></span>
+      <b>السنترال</b><span><%= call.server_name %> <span class="muted">(<%= call.warehouse %>)</span></span>
+      <b>الموظف</b><span><%= call.agent_name || '—' %></span>
+      <b>التحويلة</b><span><%= call.agent_ext || '—' %></span>
+      <b>رقم العميل</b><span dir="ltr" style="text-align:right"><%= call.phone %> <span class="muted">(<%= call.dst_raw %>)</span></span>
+      <b>الاتجاه</b><span><%= call.direction === 'out' ? 'صادرة' : 'واردة' %></span>
+      <b>المدة</b><span><%= fmtDuration(call.billsec) %> (إجمالي <%= fmtDuration(call.duration) %>)</span>
+      <b>uniqueid</b><span dir="ltr" class="muted" style="text-align:right"><%= call.uniqueid %></span>
+      <b>التسجيل</b><span class="muted"><%= call.recording_branch ? call.recording_branch + ' / ' + call.recording_path : 'لم يُحدد بعد (يُحدد تلقائياً عند التشغيل)' %></span>
+      <% if (call.error) { %><b style="color:var(--red)">خطأ</b><span style="color:var(--red)"><%= call.error %></span><% } %>
+      <% if (call.skip_reason) { %><b>سبب الاستبعاد</b><span class="muted"><%= call.skip_reason %></span><% } %>
+    </div>
+    <audio controls preload="none" src="/calls/<%= call.id %>/audio"></audio>
+    <p class="muted">التسجيل بيتشغّل مباشرة من سيرفر الفرع، ولا يُخزّن هنا.</p>
+    <div style="margin-top:.5rem">
+      <b class="muted">🎧 من سمع المكالمة:</b>
+      <% if (!listens.length) { %><span class="muted">لم تُسمع بعد</span><% } else { %>
+        <% for (const l of listens.slice(0, 8)) { %><span class="badge blue" title="<%= l.listened_at %>"><%= l.who || 'مستخدم محذوف' %> · <span class="dt"><%= l.listened_at.slice(5, 16) %></span></span> <% } %>
+        <% if (listens.length > 8) { %><span class="muted">+<%= listens.length - 8 %></span><% } %>
+      <% } %>
+    </div>
+    <div style="margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap">
+      <% if (!['transcribing','analyzing'].includes(call.status)) { %>
+      <form method="POST" action="/calls/<%= call.id %>/transcribe" class="inline-form"><button class="btn" <%= !providers.stt ? 'title="مزود STT غير مضبوط"' : '' %>>🎙 <%= transcript ? 'أعد التحويل لنص' : 'حوّل لنص' %></button></form>
+      <% } %>
+      <% if (transcript) { %><form method="POST" action="/calls/<%= call.id %>/reanalyze" class="inline-form"><button class="btn secondary">🔁 أعد التحليل</button></form><% } %>
+      <form method="POST" action="/calls/<%= call.id %>/resolve" class="inline-form"><button class="btn secondary">🔎 حدّد التسجيل</button></form>
+    </div>
+    <% if (!rule.queue && call.status === 'new') { %><p class="muted" style="margin-top:.5rem">القواعد الحالية لا تحوّل هذه المكالمة تلقائياً (<%= rule.reason %>).</p><% } %>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🧠 التحليل</div>
+    <% if (!analysis) { %><p class="muted">لم يتم التحليل بعد.</p><% } else { %>
+    <div class="kv">
+      <b>شكوى؟</b><span><% if (analysis.is_complaint) { %><span class="chip">نعم — <%= analysis.complaint_type %></span><% } else { %>لا<% } %></span>
+      <b>مخالفة من المحصل؟</b><span><% if (analysis.agent_violation) { %><span class="chip">نعم — <%= ({illegal_threat:'تهديد غير مشروع',false_claim:'ادعاء كاذب',insult:'إساءة',third_party_threat:'تهديد بالتواصل مع الغير',unprofessional:'سلوك غير مهني',other:'مخالفة'})[analysis.violation_type] || analysis.violation_type %></span><% } else { %>لا<% } %></span>
+      <% if (analysis.needs_ticket != null) { %><b>تستدعي تذكرة؟</b><span><% if (analysis.needs_ticket) { %><span class="chip">نعم</span><% } else { %>لا<% } %> <span class="muted"><%= analysis.ticket_reason && analysis.ticket_reason !== 'لا يوجد' ? '— ' + analysis.ticket_reason : '' %></span></span><% } %>
+      <b>الخطورة</b><span><span class="chip <%= analysis.severity %>"><%= analysis.severity %></span></span>
+      <% if (analysis.quality_score != null) { %><b>تقييم الجودة</b><span class="score" style="color:<%= analysis.quality_score>=70?'var(--green)':analysis.quality_score>=40?'var(--amber)':'var(--red)' %>"><%= analysis.quality_score %> / 100</span><% } %>
+      <% if (analysis.sentiment) { %><b>مزاج العميل</b><span><%= {positive:'إيجابي',neutral:'محايد',negative:'سلبي'}[analysis.sentiment] %></span><% } %>
+      <% if (analysis.employee_mentioned) { %><b>موظف مذكور</b><span><%= analysis.employee_mentioned %></span><% } %>
+      <% if (analysis.company_mentioned) { %><b>شركة مذكورة</b><span><%= analysis.company_mentioned %></span><% } %>
+      <b>المحلل</b><span class="muted"><%= analysis.provider %> <%= analysis.model || '' %> · <span class="dt"><%= analysis.created_at %></span></span>
+    </div>
+    <% if (analysis.summary) { %><p style="margin-top:.75rem;line-height:1.8"><%= analysis.summary %></p><% } %>
+    <% if (analysis.banned_hits.length) { %>
+      <div style="margin-top:.75rem"><b>كلمات محظورة:</b>
+      <% for (const h of analysis.banned_hits) { %><span class="chip <%= h.severity %>" title="<%= h.context %>"><%= h.word %> ×<%= h.count %></span><% } %></div>
+    <% } %>
+    <% if (analysis.issues.length) { %><div style="margin-top:.75rem"><b>ملاحظات:</b><ul style="margin-right:1.2rem;line-height:1.8"><% for (const i of analysis.issues) { %><li><%= i %></li><% } %></ul></div><% } %>
+    <% if (analysis.recommendations.length) { %><div style="margin-top:.5rem"><b>توصيات:</b><ul style="margin-right:1.2rem;line-height:1.8"><% for (const i of analysis.recommendations) { %><li><%= i %></li><% } %></ul></div><% } %>
+    <% } %>
+
+    <div class="card-title" style="margin-top:1.25rem">🎫 التذاكر</div>
+    <% for (const t of tickets) { %><p><a href="/tickets/<%= t.id %>">#<%= t.id %> — <%= t.title %></a> <span class="badge <%= t.status==='open'?'red':t.status==='in_progress'?'amber':'green' %>"><%= TICKET_AR[t.status] %></span> <span class="muted"><%= t.company_name || '' %></span></p><% } %>
+    <details style="margin-top:.5rem"><summary class="btn secondary sm">➕ فتح تذكرة يدوية</summary>
+      <form method="POST" action="/calls/<%= call.id %>/ticket" style="margin-top:.75rem">
+        <div class="field"><label>العنوان</label><input type="text" name="title" required></div>
+        <div class="row"><div><label>الشركة</label><select name="company_id"><option value="">—</option><% for (const c of companies) { %><option value="<%= c.id %>"><%= c.name %></option><% } %></select></div>
+        <div><label>الخطورة</label><select name="severity"><option value="low">منخفضة</option><option value="medium" selected>متوسطة</option><option value="high">عالية</option></select></div></div>
+        <div class="field"><label>الوصف</label><textarea name="description" rows="3"></textarea></div>
+        <button class="btn">فتح التذكرة</button>
+      </form>
+    </details>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">📝 نص المكالمة <% if (transcript) { %><span class="muted">(<%= transcript.provider %> <%= transcript.model || '' %> · <%= Math.round((transcript.took_ms||0)/1000) %> ث · <%= Math.round((transcript.audio_bytes||0)/1024) %> KB)</span><% } %></div>
+  <% if (!transcript) { %><p class="muted">لم يتم التحويل بعد. اضغط «حوّل لنص».</p><% } else if (segments.length && segments.some(s => s.speaker != null)) { %>
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.6rem">
+      <% for (const [sid, role] of Object.entries(speakerMap)) { %><span class="badge <%= role==='agent' ? 'blue' : role==='customer' ? 'green' : 'gray' %>"><%= roleLabel(role) %> = متحدث <%= sid %></span><% } %>
+      <form method="POST" action="/calls/<%= call.id %>/swap-roles" class="inline-form"><button class="btn secondary sm" title="لو التحديد التلقائي غلط">🔄 بدّل الأدوار</button></form>
+    </div>
+    <div class="transcript chat">
+      <% for (const s of segments) { if (!/[\p{L}\p{N}]/u.test(s.text || '')) continue; const role = s.speaker != null ? (speakerMap[String(s.speaker)] || ('other' + s.speaker)) : null; %>
+      <div class="turn <%= role %>"><span class="turn-who"><%= role ? roleLabel(role) : '' %></span><span class="turn-time">[<%= fmtDuration(Math.round(s.start||0)) %>]</span><div class="turn-text"><%- highlight(s.text||'', analysis?.banned_hits) %></div></div>
+      <% } %>
+    </div>
+  <% } else { %>
+    <div class="transcript"><%- highlight(transcript.text, analysis?.banned_hits) %></div>
+  <% } %>
+</div>
+<% if (['queued','transcribing','analyzing','transcribed'].includes(call.status)) { %>
+<div class="alert info" id="liveStatus">⏳ <span id="liveText"><%= STATUS_AR[call.status] %></span> … الصفحة هتتحدث لوحدها لما يخلص.</div>
+<script>
+(async function poll(){
+  try {
+    const r = await fetch('/api/queue.json?ids=<%= call.id %>'); const j = await r.json();
+    const c = j.calls[0];
+    if (c) {
+      document.getElementById('liveText').textContent = j.labels[c.status] + (j.stats.queued ? ' · في الانتظار قبلها: ' + Math.max(0, j.stats.queued - 1) : '');
+      if (['analyzed','failed','new'].includes(c.status)) { location.replace(location.pathname); return; }
+    }
+  } catch (e) {}
+  setTimeout(poll, 2500);
+})();
+</script>
+<% } %>
+<%- include('partials/footer') %>

@@ -1,0 +1,19 @@
+# secrets & environment-specific files (never commit)
+config.json
+branches.ini
+.env
+
+# runtime data: database, certificates, logs
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# dependencies
+node_modules/
+
+# tooling
+nssm.exe
+.claude/
+*.log

@@ -1,0 +1,22 @@
+<%- include('../partials/header', { title: 'السناترال' }) %>
+<p style="margin-bottom:1rem"><a class="btn secondary sm" href="/admin/companies">🏢 الشركات</a> <a class="btn secondary sm" href="/admin/servers">🖥 السناترال</a> <a class="btn secondary sm" href="/admin/extensions">☎️ التحويلات</a></p>
+<div class="card">
+  <div class="card-title">🖥 ربط السناترال بفروع البوابة والشركات</div>
+  <p class="muted" style="margin-bottom:1rem">فرع البوابة = الفرع اللي فيه تسجيلات السنترال ده (من أجل التشغيل والتحويل). لو سيبته فاضي، البوابة بتدور في كل الفروع. ممكن تكتب أكثر من فرع بفاصلة.
+  <% if (branches.length) { %><br>فروع البوابة المتاحة: <% for (const b of branches) { %><code><%= b.id || b.key || b.name || JSON.stringify(b) %></code> <% } %><% } else { %><br>لم يتم الاتصال بالبوابة (تأكد من مفتاح API).<% } %></p>
+  <form method="POST" action="/admin/servers">
+    <div class="table-wrap"><table>
+      <tr><th>المستودع</th><th>السنترال</th><th>مكالمات</th><th>فرع البوابة</th><th>الشركة الافتراضية</th><th>وصف</th></tr>
+      <% for (const s of known) { const m = map[s.server_name] || {}; %>
+      <tr>
+        <td><%= s.warehouse %></td><td><b><%= s.server_name %></b><input type="hidden" name="server_name" value="<%= s.server_name %>"></td><td><%= s.calls %></td>
+        <td><input type="text" name="gateway_branch" value="<%= m.gateway_branch || '' %>" placeholder="مثال: maadi"></td>
+        <td><select name="company_id"><option value="">—</option><% for (const c of companies) { %><option value="<%= c.id %>" <%= m.company_id===c.id?'selected':'' %>><%= c.name %></option><% } %></select></td>
+        <td><input type="text" name="label" value="<%= m.label || '' %>" placeholder="مثال: فرع المعادي"></td>
+      </tr>
+      <% } if (!known.length) { %><tr><td colspan="6" class="muted">لا توجد سناترال بعد. هتظهر بعد أول سحب.</td></tr><% } %>
+    </table></div>
+    <button class="btn" style="margin-top:1rem">حفظ</button>
+  </form>
+</div>
+<%- include('../partials/footer') %>

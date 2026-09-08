@@ -1,0 +1,133 @@
+<%- include('partials/header', { title: 'تذكرة #' + t.id }) %>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">🎫 تذكرة #<%= t.id %> <span class="badge <%= t.status==='open'?'red':t.status==='in_progress'?'amber':'green' %>"><%= TICKET_AR[t.status] %></span> <span class="chip <%= t.severity %>"><%= t.severity %></span></div>
+    <h3 style="margin-bottom:.5rem"><%= t.title %></h3>
+    <p style="white-space:pre-wrap;line-height:1.8"><%= t.description || '' %></p>
+    <div class="kv" style="margin-top:1rem">
+      <b>الشركة</b><span><%= t.company_name || 'غير محددة' %></span>
+      <b>الموظف</b><span><%= t.agent_name || '—' %> (<%= t.agent_ext || '—' %>)</span>
+      <b>المصدر</b><span><%= t.source === 'auto' ? 'تلقائي من التحليل' : 'يدوي' %></span>
+      <b>أُنشئت</b><span><span class="dt"><%= t.created_at %></span></span>
+      <% if (t.resolved_at) { %><b>تم الحل</b><span><span class="dt"><%= t.resolved_at %></span></span><% } %>
+      <% if (t.closed_at) { %><b>أُغلقت</b><span><span class="dt"><%= t.closed_at %></span></span><% } %>
+    </div>
+
+    <div class="card-title" style="margin-top:1.25rem">📞 المكالمة</div>
+    <div class="kv">
+      <b>التاريخ</b><span><a href="/calls/<%= call.id %>"><span class="dt"><%= call.calldate %></span></a></span>
+      <b>رقم العميل</b><span dir="ltr" style="text-align:right"><%= call.phone %></span>
+      <b>السنترال</b><span><%= call.server_name %></span>
+      <b>المدة</b><span><%= fmtDuration(call.billsec) %></span>
+    </div>
+    <audio controls preload="none" src="/calls/<%= call.id %>/audio"></audio>
+
+    <% if (analysis) { %>
+    <div class="card-title" style="margin-top:1.25rem">🧠 ملخص التحليل</div>
+    <p style="line-height:1.8"><%= analysis.summary || '—' %></p>
+    <% if (analysis.banned_hits.length) { %><p><% for (const h of analysis.banned_hits) { %><span class="chip <%= h.severity %>" title="<%= h.context %>"><%= h.word %> ×<%= h.count %></span><% } %></p><% } %>
+    <% if (analysis.issues.length) { %><ul style="margin-right:1.2rem;line-height:1.8"><% for (const i of analysis.issues) { %><li><%= i %></li><% } %></ul><% } %>
+    <% } %>
+    <% if (transcript) { %><details style="margin-top:.75rem"><summary class="btn secondary sm">📝 نص المكالمة</summary><div class="transcript" style="margin-top:.5rem"><%= transcript.text %></div></details><% } %>
+
+    <div class="card-title" style="margin-top:1.25rem">📚 كل مكالمات هذا العميل <span class="badge"><%= related.length %></span> <span class="muted" dir="ltr"><%= call.phone %></span></div>
+    <% if (!related.length) { %><p class="muted">لا توجد مكالمات أخرى لهذا الرقم.</p><% } %>
+    <% for (const r of related) { %>
+    <div class="related-call <%= r.id === call.id ? 'current' : '' %>">
+      <button type="button" class="btn secondary sm play-btn" onclick="playRow(<%= r.id %>, this)" title="تشغيل">▶</button>
+      <span class="mini-slot"></span>
+      <span class="dt nowrap"><%= r.calldate %></span>
+      <span class="muted"><%= r.agent_name || r.agent_ext || '—' %> · <%= r.server_name %></span>
+      <span class="badge gray"><%= fmtDuration(r.billsec) %></span>
+      <% if (r.id === call.id) { %><span class="badge amber">مكالمة الشكوى</span><% } %>
+      <% if (r.is_complaint) { %><span class="chip">شكوى</span><% } %>
+      <% if (r.hits) { %><span class="chip medium">🚫 <%= r.hits %></span><% } %>
+      <% if (r.has_text) { %><a class="badge blue" href="/calls/<%= r.id %>">📝 النص</a><% } else if (isStaff) { %><a class="muted" href="/calls/<%= r.id %>">بدون نص</a><% } %>
+      <% if (r.listens) { %><span class="muted">🎧 <%= r.listens %></span><% } %>
+    </div>
+    <% } %>
+    <script>
+    let currentAudio = null, currentBtn = null;
+    async function playRow(id, btn) {
+      if (currentBtn === btn && currentAudio) { currentAudio.paused ? currentAudio.play() : currentAudio.pause(); return; }
+      if (currentAudio) { currentAudio.pause(); currentAudio.remove(); if (currentBtn) currentBtn.textContent = '▶'; }
+      const slot = btn.parentElement.querySelector('.mini-slot');
+      slot.innerHTML = '<span class="muted">⏳</span>'; btn.disabled = true;
+      try {
+        const probe = await fetch('/calls/' + id + '/audio', { headers: { Range: 'bytes=0-0' } });
+        if (probe.status >= 400) { slot.innerHTML = '<span class="muted" style="color:var(--red)">' + (await probe.text()).slice(0, 120) + '</span>'; return; }
+      } catch (e) { slot.innerHTML = '<span class="muted" style="color:var(--red)">تعذر الاتصال</span>'; return; }
+      finally { btn.disabled = false; }
+      const a = document.createElement('audio');
+      a.controls = true; a.preload = 'none'; a.src = '/calls/' + id + '/audio'; a.style.cssText = 'width:230px;height:32px;margin:0;vertical-align:middle';
+      a.addEventListener('play', () => { btn.textContent = '⏸'; }); a.addEventListener('pause', () => { btn.textContent = '▶'; });
+      slot.innerHTML = ''; slot.appendChild(a); currentAudio = a; currentBtn = btn; a.play().catch(() => {});
+    }
+    </script>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🪜 سلسلة التصعيد <span class="badge">الخطوة <%= t.step_no %>/<%= t.step_total %></span>
+      <% if (t.due_at && ['open','in_progress'].includes(t.status)) { const od = new Date(t.due_at.replace(' ','T')).getTime() < Date.now(); %><span class="badge <%= od ? 'red' : 'gray' %>"><%= od ? '⏰ تجاوزت المهلة' : 'المهلة حتى' %> <span class="dt"><%= t.due_at.slice(0,16) %></span></span><% } %>
+    </div>
+    <% const isOpen = ['open','in_progress','resolved'].includes(t.status); %>
+    <% if (!chain.length) { %><p class="muted">لا توجد سلسلة تصعيد. <% if (user.role==='admin') { %><a href="/admin/users">أضف مستخدمين بأدوار الجودة وعناية العملاء ومدير القطاع</a><% } %></p><% } else { %>
+    <ol style="margin:0 1.2rem .75rem 0; line-height:2">
+      <% for (const s of chain) { const cur = s.step_no === t.step_no && isOpen; const done = s.step_no < t.step_no || t.status === 'closed'; const names = (s.candidates||[]).map(c => c.full_name || c.username); %>
+      <li style="<%= cur ? 'font-weight:800;color:var(--primary)' : done ? 'color:var(--green)' : 'color:var(--dim)' %>">
+        <%= done ? '✔' : cur ? '▶' : '○' %> <%= s.label %>
+        <span class="muted" style="font-weight:500"><%= names.length ? '— ' + names.join('، ') : '— (لا يوجد مستخدم بهذا الدور)' %></span>
+        <%= cur ? ' (الحالي)' : '' %>
+      </li>
+      <% } %>
+    </ol>
+    <% } %>
+    <% if (t.status === 'closed') { %>
+      <div class="alert success">✅ الشكوى مغلقة<% if (t.resolution) { %> — <b>النتيجة والإجراءات:</b> <span style="white-space:pre-wrap"><%= t.resolution %></span><% } %></div>
+    <% } else if (canAct) { %>
+      <% if (canClose) { %>
+      <form method="POST" action="/tickets/<%= t.id %>/close" style="margin-bottom:1rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:.8rem">
+        <div class="field"><label>🏁 إغلاق الشكوى — النتيجة والإجراء المتخذ (اتحلت؟ العميل اشتكى؟ الإجراء على الموظف؟)</label><textarea name="resolution" rows="3" required placeholder="مثال: تم الاعتذار للعميل وسحب رقمه من النظام، وتم توجيه إنذار كتابي للمحصل"></textarea></div>
+        <button class="btn green" onclick="return confirm('إغلاق الشكوى نهائياً؟')">🏁 إغلاق الشكوى</button>
+      </form>
+      <% } %>
+      <% if (chain.some(s => s.step_no > t.step_no)) { %>
+      <form method="POST" action="/tickets/<%= t.id %>/escalate" class="row" style="margin-bottom:1rem;align-items:flex-end">
+        <div><label>ماذا فعلت في خطوتك؟ (يظهر للشخص التالي)</label><input type="text" name="note" placeholder="مثال: راجعت المكالمة والشكوى صحيحة"></div>
+        <div style="flex:0;white-space:nowrap"><button class="btn" onclick="return confirm('إنهاء خطوتك وتحويل التذكرة للخطوة التالية؟')">⏭ أنهِ خطوتي وحوّل للتالي</button></div>
+      </form>
+      <% } %>
+    <% } else if (isOpen) { %>
+      <p class="muted"><%= ROLES[user.role] && !ROLES[user.role].act ? '👁 دورك للمشاهدة والاستماع فقط.' : 'التذكرة حالياً في خطوة أخرى؛ يمكنك المتابعة والتعليق.' %></p>
+    <% } %>
+
+    <% if (user.role === 'admin' || (canAct && ROLES[user.role] && ROLES[user.role].allTickets)) { %>
+    <div class="card-title">⚡ الإجراءات</div>
+    <form method="POST" action="/tickets/<%= t.id %>/assign" class="row" style="margin-bottom:1rem">
+      <div><label>الشركة المسؤولة</label><select name="company_id"><option value="">—</option><% for (const c of companies) { %><option value="<%= c.id %>" <%= t.company_id===c.id?'selected':'' %>><%= c.name %></option><% } %></select></div>
+      <div><label>إسناد إلى</label><select name="assigned_to"><option value="">—</option><% for (const a of assignees) { %><option value="<%= a.id %>" <%= t.assigned_to===a.id?'selected':'' %>><%= a.full_name || a.username %></option><% } %></select></div>
+      <div style="flex:0"><button class="btn secondary">حفظ</button></div>
+    </form>
+    <form method="POST" action="/tickets/<%= t.id %>/status" class="row">
+      <div><label>تغيير الحالة</label><select name="status"><% for (const [k,v] of Object.entries(TICKET_AR)) { %><option value="<%= k %>" <%= t.status===k?'selected':'' %>><%= v %></option><% } %></select></div>
+      <div><label>ملاحظة</label><input type="text" name="note" placeholder="اختياري"></div>
+      <div style="flex:0"><button class="btn">تحديث</button></div>
+    </form>
+    <% } %>
+
+    <div class="card-title" style="margin-top:1.5rem">💬 المتابعة</div>
+    <ul class="timeline">
+      <% for (const e of events) { %>
+      <li><span class="who"><%= e.username || 'النظام' %></span> <span class="when"><span class="dt"><%= e.created_at %></span></span><br>
+        <% if (e.kind === 'comment') { %><span style="white-space:pre-wrap"><%= e.text %></span><% } else { %><span class="muted"><%= e.text %></span><% } %></li>
+      <% } %>
+    </ul>
+    <% if (ROLES[user.role] && ROLES[user.role].act) { %>
+    <form method="POST" action="/tickets/<%= t.id %>/comment" style="margin-top:1rem">
+      <div class="field"><label>إضافة تعليق</label><textarea name="text" rows="3" required></textarea></div>
+      <button class="btn">إرسال</button>
+    </form>
+    <% } %>
+  </div>
+</div>
+<%- include('partials/footer') %>

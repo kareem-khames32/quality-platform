@@ -1,0 +1,22 @@
+<%- include('partials/header', { title: 'الإشعارات' }) %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between">
+    <span>🔔 الإشعارات <% if (unread) { %><span class="badge red"><%= unread %> غير مقروء</span><% } %></span>
+    <% if (unread) { %><form method="POST" action="/notifications/read-all" class="inline-form"><button class="btn secondary sm">تعليم الكل كمقروء</button></form><% } %>
+  </div>
+  <% if (!rows.length) { %><p class="muted">لا توجد إشعارات.</p><% } %>
+  <% const icons = { created: '🆕', escalate: '⏭', assign: '👤', comment: '💬', status: '🔁' }; %>
+  <% for (const n of rows) { %>
+  <a href="/notifications/<%= n.id %>/go" class="notif <%= n.read_at ? '' : 'unread' %>" style="color:inherit">
+    <span class="kind"><%= icons[n.kind] || '🔔' %></span>
+    <span style="flex:1">
+      <div><%= n.text %></div>
+      <div class="muted"><span class="dt"><%= n.created_at %></span>
+        <% if (n.ticket_id) { %> · تذكرة #<%= n.ticket_id %> <span class="chip <%= n.severity %>"><%= n.severity %></span> <span class="badge <%= n.status==='open'?'red':n.status==='in_progress'?'amber':'green' %>"><%= TICKET_AR[n.status] || n.status %></span><% } %>
+        <% if (n.emailed) { %> · 📧 أُرسل بالبريد<% } %>
+      </div>
+    </span>
+  </a>
+  <% } %>
+</div>
+<%- include('partials/footer') %>

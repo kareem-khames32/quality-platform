@@ -1,0 +1,66 @@
+<%- include('../partials/header', { title: 'المستخدمون' }) %>
+<% if (tempPassword) { %><div class="alert success">تم. بيانات الدخول: <b dir="ltr"><%= tempPassword %></b> — المستخدم سيُطلب منه تغيير كلمة المرور عند أول دخول.</div><% } %>
+<div class="alert info">كل مستخدم جديد (وكل «إعادة تعيين») بياخد الباسورد الافتراضي <b dir="ltr"><%= defaultPassword %></b> ويُجبر على تغييره أول دخول.</div>
+
+<div class="card">
+  <div class="card-title">🧭 الأدوار وصلاحياتها</div>
+  <div class="table-wrap"><table>
+    <tr><th>الدور</th><th>المكالمات</th><th>التذاكر</th><th>الإجراء</th><th>ملاحظة</th></tr>
+    <% for (const [k, r] of Object.entries(ROLES)) { %>
+    <tr><td><b><%= r.label %></b></td>
+      <td><%= r.calls ? 'كل المكالمات + استماع' : 'مكالمات تذاكره فقط' %></td>
+      <td><%= r.allTickets ? 'كل الشركات' : 'شركاته فقط' %></td>
+      <td><%= !r.act ? '👁 مشاهدة فقط' : r.close ? '✅ يقفل الشكوى' : '⏭ ينفّذ خطوته ويحوّل' %></td>
+      <td class="muted"><%= r.scoped ? 'لازم تحدد له شركاته' : '' %><%= r.banned ? ' · يدير الكلمات المحظورة' : '' %></td></tr>
+    <% } %>
+  </table></div>
+  <p class="muted" style="margin-top:.5rem">مسار الشكوى: أخصائي الجودة ← مدير الجودة ← عناية العملاء ← مدير القطاع (يقفل). إدارة العمليات ومدير المشروع يستلموا إشعار ويقدروا يسمعوا بس.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">➕ مستخدم جديد</div>
+  <form method="POST" action="/admin/users">
+    <div class="row">
+      <div><label>اسم المستخدم</label><input type="text" name="username" required></div>
+      <div><label>الاسم الكامل</label><input type="text" name="full_name"></div>
+      <div><label>الإيميل (للإشعارات)</label><input type="text" name="email" dir="ltr" placeholder="name@maharahsa.com"></div>
+      <div><label>الدور</label><select name="role"><% for (const [k, r] of Object.entries(ROLES)) { %><option value="<%= k %>" <%= k==='quality_specialist'?'selected':'' %>><%= r.label %></option><% } %></select></div>
+    </div>
+    <div class="field" style="margin-top:.5rem"><label>الشركات المسؤول عنها (لأخصائي الجودة ومدير المشروع)</label>
+      <div style="display:flex;flex-wrap:wrap;gap:.5rem .9rem"><% for (const c of allCompanies) { %><label style="display:inline-flex;align-items:center;gap:.3rem;font-weight:500;color:var(--text)"><input type="checkbox" name="company_ids" value="<%= c.id %>"> <%= c.name %></label><% } %>
+      <% if (!allCompanies.length) { %><span class="muted">أضف الشركات أولاً من صفحة الشركات.</span><% } %></div>
+    </div>
+    <button class="btn">إنشاء</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-title">👥 المستخدمون <span class="badge"><%= users.length %></span></div>
+  <div class="table-wrap"><table>
+    <tr><th>المستخدم</th><th>الاسم / الإيميل</th><th>الدور</th><th>الشركات</th><th>الحالة</th><th></th></tr>
+    <% for (const u of users) { %>
+    <tr style="<%= u.active ? '' : 'opacity:.5' %>">
+      <td><b><%= u.username %></b><div class="muted"><span class="dt"><%= u.created_at.slice(0,10) %></span></div></td>
+      <td><form method="POST" action="/admin/users/<%= u.id %>/email" class="row" style="gap:.3rem;min-width:260px"><input type="text" name="full_name" value="<%= u.full_name || '' %>" placeholder="الاسم" style="min-width:100px"><input type="text" name="email" dir="ltr" value="<%= u.email || '' %>" placeholder="email" style="min-width:130px"><button class="btn secondary sm" style="flex:0">💾</button></form></td>
+      <td><form method="POST" action="/admin/users/<%= u.id %>/role" class="inline-form"><select name="role" onchange="this.form.submit()" <%= u.id===user.id?'disabled':'' %>><% for (const [k, r] of Object.entries(ROLES)) { %><option value="<%= k %>" <%= u.role===k?'selected':'' %>><%= r.label %></option><% } %></select></form></td>
+      <td>
+        <% if (ROLES[u.role] && ROLES[u.role].scoped) { %>
+        <form method="POST" action="/admin/users/<%= u.id %>/companies" style="display:flex;flex-wrap:wrap;gap:.3rem .7rem;align-items:center">
+          <% for (const c of allCompanies) { %><label style="display:inline-flex;align-items:center;gap:.25rem;font-weight:500;color:var(--text);margin:0"><input type="checkbox" name="company_ids" value="<%= c.id %>" <%= u.company_ids.includes(c.id)?'checked':'' %>> <%= c.name %></label><% } %>
+          <button class="btn secondary sm">💾</button>
+        </form>
+        <% } else { %><span class="muted">كل الشركات</span><% } %>
+      </td>
+      <td><span class="badge <%= u.active?'green':'gray' %>"><%= u.active ? 'نشط' : 'موقوف' %></span> <% if (u.must_change_password) { %><span class="badge amber">باسورد افتراضي</span><% } %></td>
+      <td style="white-space:nowrap">
+        <form method="POST" action="/admin/users/<%= u.id %>/reset" class="inline-form" onsubmit="return confirm('إعادة تعيين كلمة المرور للافتراضية؟')"><button class="btn secondary sm">🔑</button></form>
+        <% if (u.id !== user.id) { %>
+        <form method="POST" action="/admin/users/<%= u.id %>/toggle" class="inline-form"><button class="btn secondary sm"><%= u.active ? 'إيقاف' : 'تفعيل' %></button></form>
+        <form method="POST" action="/admin/users/<%= u.id %>/delete" class="inline-form" onsubmit="return confirm('حذف المستخدم نهائياً؟')"><button class="btn danger sm">حذف</button></form>
+        <% } %>
+      </td>
+    </tr>
+    <% } %>
+  </table></div>
+</div>
+<%- include('../partials/footer') %>
