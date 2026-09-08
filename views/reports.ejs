@@ -1,0 +1,157 @@
+<%- include('partials/header', { title: 'التقارير' }) %>
+<% const qsBase = new URLSearchParams({ from: f.from, to: f.to, server: f.server || '', company: f.company_id || '' }).toString();
+   const tabs = [['overview','📊 نظرة عامة'],['agents','👤 المحصلون'],['companies','🏢 الشركات'],['words','🚫 الكلمات المحظورة'],['lifecycle','🪜 دورة الشكاوى'],['listens','🎧 الاستماع'],['servers','🖥 السناترال']];
+   const n = (v) => (v == null ? '—' : Number(v).toLocaleString('en'));
+   const pct = (a, b) => (b ? Math.round((a || 0) / b * 100) : 0);
+   function bars(rows, key, label) { const mx = Math.max(1, ...rows.map(r => r[key] || 0)); let h = '<table>'; for (const r of rows) { h += `<tr><td style="width:40%">${r[label]}</td><td><div class="bar"><div style="width:${Math.round((r[key]||0)/mx*100)}%"></div></div></td><td style="width:70px"><b>${n(r[key])}</b></td></tr>`; } return h + '</table>'; }
+%>
+<div class="card">
+  <form method="GET" action="/reports" class="row">
+    <input type="hidden" name="tab" value="<%= tab %>">
+    <div><label>من</label><input type="date" name="from" value="<%= f.from %>"></div>
+    <div><label>إلى</label><input type="date" name="to" value="<%= f.to %>"></div>
+    <div><label>الشركة</label><select name="company"><option value="">الكل</option><% for (const c of companiesList) { %><option value="<%= c.id %>" <%= f.company_id===c.id?'selected':'' %>><%= c.name %></option><% } %></select></div>
+    <div><label>السنترال</label><select name="server"><option value="">الكل</option><% for (const s of serversList) { %><option value="<%= s.server_name %>" <%= f.server===s.server_name?'selected':'' %>><%= s.server_name %></option><% } %></select></div>
+    <div style="flex:0"><button class="btn">عرض</button></div>
+    <div style="flex:0;white-space:nowrap">
+      <% const today = new Date(); const p=(x)=>String(x).padStart(2,'0'); const ymd=(d)=>`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; const d7=new Date(today); d7.setDate(d7.getDate()-6); const m1=new Date(today.getFullYear(), today.getMonth(), 1); %>
+      <a class="btn secondary sm" href="/reports?tab=<%= tab %>&from=<%= ymd(today) %>&to=<%= ymd(today) %>">اليوم</a>
+      <a class="btn secondary sm" href="/reports?tab=<%= tab %>&from=<%= ymd(d7) %>&to=<%= ymd(today) %>">7 أيام</a>
+      <a class="btn secondary sm" href="/reports?tab=<%= tab %>&from=<%= ymd(m1) %>&to=<%= ymd(today) %>">الشهر</a>
+    </div>
+  </form>
+</div>
+
+<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem">
+  <% for (const [k, lbl] of tabs) { %><a class="btn <%= tab===k ? '' : 'secondary' %> sm" href="/reports?tab=<%= k %>&<%= qsBase %>"><%= lbl %></a><% } %>
+</div>
+
+<% const o = data.overview; %>
+<div class="grid grid-4" style="margin-bottom:1.25rem">
+  <div class="stat"><div class="label">مكالمات مردودة في الفترة</div><div class="value"><%= n(o.calls.total) %></div><div class="muted">أطول من 20 ث: <%= n(o.calls.over20) %></div></div>
+  <div class="stat"><div class="label">تم تحويلها وتحليلها</div><div class="value" style="color:var(--green)"><%= n(o.calls.analyzed) %></div><div class="muted"><%= n(Math.round(o.calls.minutes_transcribed||0)) %> دقيقة صوت · فشل <%= n(o.calls.failed) %></div></div>
+  <div class="stat"><div class="label">فيها كلمات محظورة</div><div class="value" style="color:var(--amber)"><%= n(o.calls.with_hits) %></div><div class="muted"><%= pct(o.calls.with_hits, o.calls.transcribed) %>% من المحوّلة · راجعها الـ AI: <%= n(o.calls.llm_calls) %></div></div>
+  <div class="stat"><div class="label">مخالفات مؤكدة / شكاوى</div><div class="value" style="color:var(--red)"><%= n(o.calls.violations) %> / <%= n(o.calls.complaints) %></div><div class="muted">متوسط تقييم الجودة: <%= o.calls.avg_score ?? '—' %></div></div>
+  <div class="stat"><div class="label">تذاكر فُتحت</div><div class="value"><%= n(o.tickets.opened) %></div><div class="muted">عالية <%= n(o.tickets.high) %> · متوسطة <%= n(o.tickets.medium) %> · منخفضة <%= n(o.tickets.low) %></div></div>
+  <div class="stat"><div class="label">أُغلقت</div><div class="value" style="color:var(--green)"><%= n(o.tickets.closed) %></div><div class="muted">منها تلقائياً بالـ AI: <%= n(o.tickets.auto_closed) %></div></div>
+  <div class="stat"><div class="label">مفتوحة الآن / متأخرة</div><div class="value" style="color:<%= o.tickets.overdue ? 'var(--red)' : 'var(--primary)' %>"><%= n(o.tickets.still_open) %> / <%= n(o.tickets.overdue) %></div><div class="muted">متوسط زمن الإغلاق: <%= o.tickets.avg_close_hours ?? '—' %> ساعة</div></div>
+  <div class="stat"><div class="label">التكلفة التقديرية</div><div class="value">$<%= data.cost.total_usd %></div><div class="muted">STT $<%= data.cost.stt_usd %> · AI $<%= data.cost.llm_usd %> (<%= n(data.cost.llm_calls) %> تحليل)</div></div>
+</div>
+
+<% if (tab === 'overview') { %>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title" style="justify-content:space-between"><span>📈 يومياً</span><a class="btn secondary sm" href="/reports/export.csv?table=daily&<%= qsBase %>">⬇ Excel</a></div>
+    <div class="table-wrap"><table>
+      <tr><th>اليوم</th><th>مكالمات</th><th>+20ث</th><th>محوّلة</th><th>كلمات محظورة</th><th>مخالفات</th><th>شكاوى</th><th>تقييم</th><th>تذاكر</th><th>أُغلقت</th></tr>
+      <% for (const r of data.daily.slice().reverse()) { %>
+      <tr><td><span class="dt"><%= r.d %></span></td><td><%= n(r.calls) %></td><td><%= n(r.over20) %></td><td><%= n(r.transcribed) %></td><td><%= n(r.with_hits) %></td><td><%= n(r.violations) %></td><td><%= n(r.complaints) %></td><td><%= r.avg_score ?? '—' %></td><td><%= n(r.tickets_opened) %></td><td><%= n(r.tickets_closed) %></td></tr>
+      <% } if (!data.daily.length) { %><tr><td colspan="10" class="muted">لا توجد بيانات في الفترة.</td></tr><% } %>
+    </table></div>
+  </div>
+  <div class="card">
+    <div class="card-title">🚨 أنواع مخالفات المحصلين (مؤكدة من الـ AI)</div>
+    <% if (!data.breakdown.viol.length) { %><p class="muted">لا توجد.</p><% } else { %><%- bars(data.breakdown.viol, 'n', 'label') %><% } %>
+    <div class="card-title" style="margin-top:1rem">📣 أنواع شكاوى العملاء</div>
+    <% if (!data.breakdown.comp.length) { %><p class="muted">لا توجد.</p><% } else { %><%- bars(data.breakdown.comp, 'n', 'label') %><% } %>
+    <div class="grid grid-2" style="margin-top:1rem">
+      <div><div class="card-title">🎯 توزيع تقييم الجودة</div><% if (!data.breakdown.scores.length) { %><p class="muted">—</p><% } else { %><%- bars(data.breakdown.scores, 'n', 'label') %><% } %></div>
+      <div><div class="card-title">😐 مزاج العملاء</div><% if (!data.breakdown.sent.length) { %><p class="muted">—</p><% } else { %><%- bars(data.breakdown.sent, 'n', 'label') %><% } %></div>
+    </div>
+  </div>
+</div>
+<% } %>
+
+<% if (tab === 'agents') { %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between"><span>👤 أداء المحصلين <span class="muted">مرتّب بالمخالفات ثم الشكاوى</span></span><a class="btn secondary sm" href="/reports/export.csv?table=agents&<%= qsBase %>">⬇ Excel</a></div>
+  <div class="table-wrap"><table>
+    <tr><th>#</th><th>المحصل</th><th>التحويلة</th><th>الشركة</th><th>مكالمات</th><th>دقائق</th><th>محوّلة</th><th>تقييم</th><th>كلمات محظورة</th><th>مخالفات</th><th>شكاوى</th><th>تذاكر</th><th>تذاكر مؤكدة</th></tr>
+    <% data.agents.forEach((r, i) => { %>
+    <tr>
+      <td class="muted"><%= i + 1 %></td>
+      <td><% if (canSeeCalls) { %><a href="/calls?ext=<%= r.ext %>&from=<%= f.from %>&to=<%= f.to %>"><%= r.name || '—' %></a><% } else { %><%= r.name || '—' %><% } %></td>
+      <td><%= r.ext %></td><td class="muted"><%= r.company || '—' %></td>
+      <td><%= n(r.calls) %></td><td><%= n(r.minutes) %></td><td><%= n(r.transcribed) %></td>
+      <td><% if (r.avg_score != null) { %><span class="badge <%= r.avg_score>=70?'green':r.avg_score>=40?'amber':'red' %>"><%= r.avg_score %></span><% } else { %>—<% } %></td>
+      <td><%= n(r.with_hits) %></td>
+      <td><% if (r.violations) { %><span class="chip"><%= r.violations %></span><% } else { %>0<% } %></td>
+      <td><% if (r.complaints) { %><span class="chip medium"><%= r.complaints %></span><% } else { %>0<% } %></td>
+      <td><a href="/tickets?status=all&agent=<%= r.ext %>"><%= n(r.tickets) %></a></td><td><%= n(r.tickets_confirmed) %></td>
+    </tr>
+    <% }); if (!data.agents.length) { %><tr><td colspan="13" class="muted">لا توجد بيانات.</td></tr><% } %>
+  </table></div>
+</div>
+<% } %>
+
+<% if (tab === 'companies') { %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between"><span>🏢 الشكاوى حسب الشركة</span><a class="btn secondary sm" href="/reports/export.csv?table=companies&<%= qsBase %>">⬇ Excel</a></div>
+  <div class="table-wrap"><table>
+    <tr><th>الشركة</th><th>تذاكر</th><th>عالية</th><th>متوسطة</th><th>منخفضة</th><th>مفتوحة الآن</th><th>متأخرة</th><th>أُغلقت</th><th>منها بالـ AI</th><th>متوسط الإغلاق (ساعة)</th></tr>
+    <% for (const r of data.companies) { %>
+    <tr><td><b><%= r.company %></b></td><td><%= n(r.tickets) %></td><td><%= n(r.high) %></td><td><%= n(r.medium) %></td><td><%= n(r.low) %></td><td><%= n(r.open_now) %></td><td><%= r.overdue ? '<span class="badge red">' + r.overdue + '</span>' : 0 %></td><td><%= n(r.closed) %></td><td><%= n(r.auto_closed) %></td><td><%= r.avg_close_hours ?? '—' %></td></tr>
+    <% } if (!data.companies.length) { %><tr><td colspan="10" class="muted">لا توجد تذاكر في الفترة.</td></tr><% } %>
+  </table></div>
+</div>
+<% } %>
+
+<% if (tab === 'words') { %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between"><span>🚫 الكلمات المحظورة الأكثر رصداً <span class="muted">وكم منها أكّده الـ AI كمخالفة أو شكوى</span></span><a class="btn secondary sm" href="/reports/export.csv?table=words&<%= qsBase %>">⬇ Excel</a></div>
+  <div class="table-wrap"><table>
+    <tr><th>الكلمة</th><th>التصنيف</th><th>الخطورة</th><th>مكالمات</th><th>مرات</th><th>مخالفة مؤكدة</th><th>شكوى مؤكدة</th><th>دقة الكلمة</th></tr>
+    <% for (const r of data.words) { const conf = (r.confirmed_violations||0) + (r.confirmed_complaints||0); %>
+    <tr><td><b><%= r.word %></b></td><td><%= r.category %></td><td><span class="chip <%= r.severity %>"><%= r.severity %></span></td><td><%= n(r.calls) %></td><td><%= n(r.occurrences) %></td><td><%= n(r.confirmed_violations) %></td><td><%= n(r.confirmed_complaints) %></td>
+      <td><span class="badge <%= pct(conf, r.calls) >= 50 ? 'green' : pct(conf, r.calls) >= 20 ? 'amber' : 'gray' %>"><%= pct(conf, r.calls) %>%</span></td></tr>
+    <% } if (!data.words.length) { %><tr><td colspan="8" class="muted">لا توجد بيانات.</td></tr><% } %>
+  </table></div>
+  <p class="muted">«دقة الكلمة» = نسبة المكالمات اللي الـ AI أكد فيها مشكلة من إجمالي المكالمات اللي ظهرت فيها الكلمة. الكلمات اللي دقتها منخفضة جداً ممكن تخفض خطورتها أو تشيلها.</p>
+</div>
+<% } %>
+
+<% if (tab === 'lifecycle') { const L = data.lifecycle; %>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title" style="justify-content:space-between"><span>⏱ متوسط الزمن في كل خطوة (ساعات)</span><a class="btn secondary sm" href="/reports/export.csv?table=steps&<%= qsBase %>">⬇ Excel</a></div>
+    <table><tr><th>الخطوة</th><th>الدور</th><th>متوسط الساعات</th><th>عينة</th></tr>
+      <% L.steps.forEach((s, i) => { %><tr><td><%= i + 1 %></td><td><b><%= s.label %></b></td><td><%= s.avg_hours ?? '—' %></td><td class="muted"><%= s.samples %></td></tr><% }); %></table>
+    <div class="card-title" style="margin-top:1rem">🎚 حسب الخطورة</div>
+    <table><tr><th>الخطورة</th><th>تذاكر</th><th>أُغلقت</th><th>متأخرة</th><th>متوسط الإغلاق (ساعة)</th></tr>
+      <% for (const r of L.bySeverity) { %><tr><td><span class="chip <%= r.severity %>"><%= r.severity %></span></td><td><%= n(r.n) %></td><td><%= n(r.closed) %></td><td><%= n(r.overdue) %></td><td><%= r.avg_close_hours ?? '—' %></td></tr><% } %></table>
+    <div class="card-title" style="margin-top:1rem">✅ من أغلق التذاكر</div>
+    <% if (!L.closers.length) { %><p class="muted">—</p><% } else { %><%- bars(L.closers, 'n', 'who') %><% } %>
+  </div>
+  <div class="card">
+    <div class="card-title" style="justify-content:space-between"><span>📝 نتائج الشكاوى المغلقة والإجراءات</span><a class="btn secondary sm" href="/reports/export.csv?table=resolutions&<%= qsBase %>">⬇ Excel</a></div>
+    <div style="max-height:600px;overflow:auto">
+    <% for (const r of L.resolutions) { %>
+    <div style="padding:.5rem 0;border-bottom:1px dashed var(--border)">
+      <a href="/tickets/<%= r.id %>">#<%= r.id %></a> <b><%= r.title %></b> <span class="chip <%= r.severity %>"><%= r.severity %></span> <span class="muted"><%= r.company || '' %> · <span class="dt"><%= (r.closed_at||'').slice(0,16) %></span> · <%= r.closed_by || 'AI' %></span>
+      <div style="white-space:pre-wrap;line-height:1.7;margin-top:.2rem"><%= r.resolution %></div>
+    </div>
+    <% } if (!L.resolutions.length) { %><p class="muted">لا توجد شكاوى مغلقة يدوياً في الفترة.</p><% } %>
+    </div>
+  </div>
+</div>
+<% } %>
+
+<% if (tab === 'listens') { %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between"><span>🎧 من سمع المكالمات</span><a class="btn secondary sm" href="/reports/export.csv?table=listens&<%= qsBase %>">⬇ Excel</a></div>
+  <table><tr><th>المستخدم</th><th>الدور</th><th>مرات الاستماع</th><th>مكالمات مختلفة</th><th>آخر استماع</th></tr>
+    <% for (const r of data.listens) { %><tr><td><b><%= r.who %></b></td><td class="muted"><%= ROLES[r.role] ? ROLES[r.role].label : (r.role || '—') %></td><td><%= n(r.listens) %></td><td><%= n(r.calls) %></td><td><span class="dt"><%= r.last_at %></span></td></tr><% } %>
+    <% if (!data.listens.length) { %><tr><td colspan="5" class="muted">لا يوجد استماع في الفترة.</td></tr><% } %></table>
+</div>
+<% } %>
+
+<% if (tab === 'servers') { %>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between"><span>🖥 حسب السنترال</span><a class="btn secondary sm" href="/reports/export.csv?table=servers&<%= qsBase %>">⬇ Excel</a></div>
+  <div class="table-wrap"><table>
+    <tr><th>المستودع</th><th>السنترال</th><th>مكالمات</th><th>+20ث</th><th>محوّلة</th><th>كلمات محظورة</th><th>مخالفات</th><th>تقييم</th><th>فشل</th></tr>
+    <% for (const r of data.servers) { %><tr><td><%= r.warehouse %></td><td><b><%= r.server_name %></b></td><td><%= n(r.calls) %></td><td><%= n(r.over20) %></td><td><%= n(r.transcribed) %></td><td><%= n(r.with_hits) %></td><td><%= n(r.violations) %></td><td><%= r.avg_score ?? '—' %></td><td><%= n(r.failed) %></td></tr><% } %>
+  </table></div>
+</div>
+<% } %>
+<%- include('partials/footer') %>

@@ -14,6 +14,7 @@ import { streamRecording, resolveRecording, probeGateway, recordingSource } from
 import { loadBranches } from './branches.js';
 import { assignRoles, swapRoles, roleLabel, formatTranscript } from './roles.js';
 import { notifyTicket, unreadCount, smtpReady, sendMail } from './notify.js';
+import * as reports from './reports.js';
 
 /** Can this user open/listen to this call? Admin/supervisor: always. Others: only calls tied to a ticket they can see (same customer phone counts). */
 function canAccessCall(user, call) {
@@ -213,6 +214,7 @@ app.get('/tickets', (req, res) => {
   if (status === 'active') w.push("t.status IN ('open','in_progress')"); else if (status && status !== 'all') { w.push('t.status=?'); p.push(status); }
   if (req.query.company) { w.push('t.company_id=?'); p.push(Number(req.query.company)); }
   if (req.query.severity) { w.push('t.severity=?'); p.push(req.query.severity); }
+  if (req.query.agent) { w.push('t.agent_ext=?'); p.push(String(req.query.agent)); }
   const rows = q.all(`SELECT t.*, c.name company_name, ca.calldate, ca.phone, ca.server_name, u.username assignee
                       FROM tickets t LEFT JOIN companies c ON c.id=t.company_id JOIN calls ca ON ca.id=t.call_id LEFT JOIN users u ON u.id=t.assigned_to
                       WHERE ${w.join(' AND ')} ORDER BY CASE t.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, t.id DESC LIMIT 300`, ...p);
@@ -318,6 +320,45 @@ app.post('/tickets/:id/assign', (req, res) => {
   db.prepare('INSERT INTO ticket_events(ticket_id,user_id,kind,text,created_at) VALUES(?,?,?,?,?)').run(t.id, req.user.id, 'assign', `إسناد التذكرة إلى: ${who}`, nowIso());
   if (uid) notifyTicket({ ticketId: t.id, kind: 'assign', text: `${req.user.full_name || req.user.username} أسند إليك التذكرة #${t.id}`, actorId: req.user.id, onlyUserIds: [uid] });
   res.redirect(`/tickets/${t.id}`);
+});
+
+/* ------------------------------ reports ------------------------------ */
+function reportFilters(req) {
+  const today = nowIso().slice(0, 10);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : today.slice(0, 8) + '01';
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : today;
+  const f = { from, to, server: req.query.server || '', company_id: Number(req.query.company) || null, companies: null };
+  // company-scoped roles only ever see their own companies
+  if (!roleInfo(req.user.role).allTickets) {
+    f.companies = req.user.companies.length ? req.user.companies : [-1];
+    if (f.company_id && !req.user.companies.includes(f.company_id)) f.company_id = null;
+  }
+  return f;
+}
+app.get('/reports', (req, res) => {
+  const f = reportFilters(req);
+  const tab = ['overview', 'agents', 'companies', 'words', 'lifecycle', 'listens', 'servers'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const data = { overview: reports.overview(f), cost: reports.cost(f) };
+  if (tab === 'overview') { data.daily = reports.daily(f); data.breakdown = reports.breakdown(f); }
+  if (tab === 'agents') data.agents = reports.agents(f);
+  if (tab === 'companies') data.companies = reports.companies(f);
+  if (tab === 'words') data.words = reports.words(f);
+  if (tab === 'lifecycle') data.lifecycle = reports.lifecycle(f);
+  if (tab === 'listens') data.listens = reports.listens(f);
+  if (tab === 'servers') data.servers = reports.servers(f);
+  const companiesList = f.companies ? q.all(`SELECT id, name FROM companies WHERE id IN (${f.companies.map(() => '?').join(',')}) ORDER BY name`, ...f.companies) : q.all('SELECT id, name FROM companies ORDER BY name');
+  const serversList = q.all('SELECT DISTINCT server_name FROM calls ORDER BY server_name');
+  res.render('reports', { f, tab, data, companiesList, serversList, canSeeCalls: !!roleInfo(req.user.role).calls });
+});
+app.get('/reports/export.csv', (req, res) => {
+  const f = reportFilters(req);
+  const t = String(req.query.table || '');
+  const fn = { daily: reports.daily, agents: reports.agents, companies: reports.companies, words: reports.words, listens: reports.listens, servers: reports.servers,
+    resolutions: (x) => reports.lifecycle(x).resolutions, steps: (x) => reports.lifecycle(x).steps }[t];
+  if (!fn) return res.status(400).send('unknown table');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="report-${t}-${f.from}-${f.to}.csv"`);
+  res.send(reports.toCsv(fn(f)));
 });
 
 /* ------------------------------ notifications ------------------------------ */

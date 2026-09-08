@@ -16,6 +16,7 @@
   <a class="nav-link <%= path.startsWith('/calls') ? 'active' : '' %>" href="/calls">📞 المكالمات</a>
   <% } %>
   <a class="nav-link <%= path.startsWith('/tickets') ? 'active' : '' %>" href="/tickets">🎫 الشكاوى <% if (openTickets) { %><span class="badge red"><%= openTickets %></span><% } %></a>
+  <a class="nav-link <%= path.startsWith('/reports') ? 'active' : '' %>" href="/reports">📑 التقارير</a>
   <% if (user.role === 'admin' || (ROLES[user.role] && ROLES[user.role].banned)) { %>
   <a class="nav-link <%= path.startsWith('/admin/banned') ? 'active' : '' %>" href="/admin/banned">🚫 الكلمات المحظورة</a>
   <% } %>
