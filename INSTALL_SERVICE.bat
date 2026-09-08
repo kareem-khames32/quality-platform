@@ -17,12 +17,15 @@ if not exist "%~dp0node_modules" ( echo Installing dependencies... & call npm in
 if not exist "%~dp0config.json" ( echo [ERROR] config.json not found. Copy config.example.json to config.json and edit it. & pause & exit /b 1 )
 
 for /f "delims=" %%i in ('where node') do set NODE_EXE=%%i
+REM folder path WITHOUT the trailing backslash (a trailing \ before the closing quote breaks nssm's argument parsing)
+set APPDIR=%~dp0
+set APPDIR=%APPDIR:~0,-1%
 
 echo Installing "CallQualityPlatform" service...
 "%~dp0nssm.exe" stop CallQualityPlatform >nul 2>&1
 "%~dp0nssm.exe" remove CallQualityPlatform confirm >nul 2>&1
 "%~dp0nssm.exe" install CallQualityPlatform "%NODE_EXE%" "--no-warnings=ExperimentalWarning src\server.js"
-"%~dp0nssm.exe" set CallQualityPlatform AppDirectory "%~dp0"
+"%~dp0nssm.exe" set CallQualityPlatform AppDirectory "%APPDIR%"
 "%~dp0nssm.exe" set CallQualityPlatform DisplayName "Call Quality Platform"
 "%~dp0nssm.exe" set CallQualityPlatform Description "Maharah call quality: CDR ingest, speech-to-text, banned words and complaint tickets"
 "%~dp0nssm.exe" set CallQualityPlatform Start SERVICE_AUTO_START
