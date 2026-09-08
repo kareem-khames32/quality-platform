@@ -7,8 +7,9 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 
-net session >nul 2>&1
-if %errorlevel% neq 0 ( echo [ERROR] Run this file as Administrator. & pause & exit /b 1 )
+REM admin check that does not depend on the "Server" (SMB) service
+fltmc >nul 2>&1
+if %errorlevel% neq 0 ( echo [ERROR] Run this file as Administrator ^(right-click ^> Run as administrator^). & pause & exit /b 1 )
 if not exist "%~dp0nssm.exe" ( echo [ERROR] nssm.exe not found next to this script. & pause & exit /b 1 )
 where node >nul 2>&1
 if %errorlevel% neq 0 ( echo [ERROR] node.exe not found in PATH. Install Node.js 22+ first. & pause & exit /b 1 )
