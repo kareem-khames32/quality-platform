@@ -137,6 +137,84 @@ export function servers(f) {
       FROM calls c ${CALL_JOINS} LEFT JOIN analyses a ON a.call_id=c.id ${c.where} GROUP BY c.warehouse, c.server_name ORDER BY c.warehouse, c.server_name`, ...c.params);
 }
 
+/* ======================= detailed (row-level) reports ======================= */
+const STATUS_AR = { new: 'جديدة', skipped: 'مستبعدة', queued: 'في الانتظار', transcribing: 'جاري التحويل', transcribed: 'تم التحويل', analyzing: 'جاري التحليل', analyzed: 'تم التحليل', failed: 'فشلت' };
+const TICKET_AR = { open: 'مفتوحة', in_progress: 'قيد المعالجة', resolved: 'تم الحل', closed: 'مغلقة' };
+const SEV_AR = { high: 'عالية', medium: 'متوسطة', low: 'منخفضة' };
+
+/** Every ticket in the period with call, agent, company, step, timings and outcome. x = extra filters {status, severity, agent, source} */
+export function ticketsDetail(f, x = {}, limit = 5000) {
+  const t = ticketWhere(f);
+  const w = [], p = [];
+  if (x.status && x.status !== 'all') { if (x.status === 'active') w.push("t.status IN ('open','in_progress')"); else { w.push('t.status=?'); p.push(x.status); } }
+  if (x.severity) { w.push('t.severity=?'); p.push(x.severity); }
+  if (x.agent) { w.push('(t.agent_ext=? OR t.agent_name LIKE ?)'); p.push(x.agent, `%${x.agent}%`); }
+  if (x.source) { w.push('t.source=?'); p.push(x.source); }
+  if (f.server) { w.push('c.server_name=?'); p.push(f.server); }
+  const rows = q.all(`SELECT t.id 'رقم التذكرة', t.title 'العنوان', ${sevCase('t.severity')} 'الخطورة', ${statusCase('t.status', TICKET_AR)} 'الحالة',
+      COALESCE(co.name,'غير محددة') 'الشركة', COALESCE(t.agent_name, c.agent_name, '') 'المحصل', t.agent_ext 'التحويلة', c.server_name 'السنترال',
+      c.phone 'رقم العميل', c.calldate 'تاريخ المكالمة', (c.billsec/60)||':'||substr('0'||(c.billsec%60),-2) 'مدة المكالمة',
+      CASE t.source WHEN 'auto' THEN 'تلقائي' ELSE 'يدوي' END 'المصدر', t.step_no||'/'||t.step_total 'الخطوة',
+      COALESCE(ua.full_name, ua.username, '') 'المسؤول الحالي', t.due_at 'المهلة',
+      CASE WHEN t.status IN ('open','in_progress') AND t.due_at < datetime('now','localtime') THEN 'نعم' ELSE '' END 'متأخرة',
+      t.created_at 'فُتحت', t.closed_at 'أُغلقت', COALESCE(uc.full_name, uc.username, CASE WHEN t.resolution LIKE 'أُغلقت تلقائياً%' THEN 'AI' END, '') 'أغلقها',
+      ROUND((julianday(COALESCE(t.closed_at, datetime('now','localtime')))-julianday(t.created_at))*24,1) 'ساعات مفتوحة',
+      a.summary 'ملخص الـ AI', CASE WHEN a.is_complaint=1 THEN 'نعم' ELSE 'لا' END 'شكوى مؤكدة', CASE WHEN a.agent_violation=1 THEN 'نعم' ELSE 'لا' END 'مخالفة محصل',
+      a.quality_score 'تقييم الجودة', (SELECT GROUP_CONCAT(json_extract(h.value,'$.word'), '، ') FROM json_each(COALESCE(a.banned_hits,'[]')) h) 'الكلمات المحظورة',
+      t.description 'التفاصيل', t.resolution 'النتيجة والإجراء',
+      (SELECT COUNT(*) FROM ticket_events e WHERE e.ticket_id=t.id AND e.kind='comment') 'عدد التعليقات'
+      FROM tickets t JOIN calls c ON c.id=t.call_id LEFT JOIN companies co ON co.id=t.company_id LEFT JOIN analyses a ON a.call_id=c.id
+      LEFT JOIN users ua ON ua.id=t.assigned_to LEFT JOIN users uc ON uc.id=t.closed_by
+      ${t.where} ${w.length ? 'AND ' + w.join(' AND ') : ''} ORDER BY t.id DESC LIMIT ?`, ...t.params, ...p, limit);
+  return rows;
+}
+
+/** Every call in the period; x = {status, agent, phone, min, hits} */
+export function callsDetail(f, x = {}, limit = 5000) {
+  const c = callWhere(f);
+  const w = [], p = [];
+  if (x.status) { w.push('c.status=?'); p.push(x.status); }
+  if (x.agent) { w.push('(c.agent_ext=? OR c.agent_name LIKE ?)'); p.push(x.agent, `%${x.agent}%`); }
+  if (x.phone) { w.push('c.phone LIKE ?'); p.push(`%${x.phone}%`); }
+  if (x.min) { w.push('c.billsec >= ?'); p.push(Number(x.min)); }
+  if (x.hits === '1') w.push("a.banned_hits IS NOT NULL AND a.banned_hits <> '[]'");
+  return q.all(`SELECT c.id 'رقم المكالمة', c.calldate 'التاريخ', c.server_name 'السنترال', c.warehouse 'المستودع', COALESCE(c.agent_name, e.agent_name, '') 'المحصل', c.agent_ext 'التحويلة',
+      COALESCE(co.name,'') 'الشركة', c.phone 'رقم العميل', CASE c.direction WHEN 'out' THEN 'صادرة' ELSE 'واردة' END 'الاتجاه',
+      (c.billsec/60)||':'||substr('0'||(c.billsec%60),-2) 'المدة', c.billsec 'ثواني', ${statusCase('c.status', STATUS_AR)} 'الحالة', c.skip_reason 'سبب الاستبعاد', c.error 'الخطأ',
+      CASE WHEN tr.call_id IS NOT NULL THEN 'نعم' ELSE 'لا' END 'محوّلة لنص',
+      (SELECT GROUP_CONCAT(json_extract(h.value,'$.word'), '، ') FROM json_each(COALESCE(a.banned_hits,'[]')) h) 'الكلمات المحظورة',
+      CASE a.is_complaint WHEN 1 THEN 'نعم' WHEN 0 THEN 'لا' END 'شكوى', CASE a.agent_violation WHEN 1 THEN 'نعم' WHEN 0 THEN 'لا' END 'مخالفة محصل',
+      a.quality_score 'تقييم الجودة', ${sevCase('a.severity')} 'الخطورة', a.summary 'ملخص الـ AI',
+      (SELECT t.id FROM tickets t WHERE t.call_id=c.id ORDER BY t.id DESC LIMIT 1) 'رقم التذكرة',
+      (SELECT COUNT(*) FROM listens l WHERE l.call_id=c.id) 'مرات الاستماع',
+      (SELECT GROUP_CONCAT(DISTINCT COALESCE(u.full_name,u.username)) FROM listens l LEFT JOIN users u ON u.id=l.user_id WHERE l.call_id=c.id) 'سمعها'
+      FROM calls c ${CALL_JOINS} LEFT JOIN companies co ON co.id=${CALL_COMPANY} LEFT JOIN analyses a ON a.call_id=c.id LEFT JOIN transcripts tr ON tr.call_id=c.id
+      ${c.where} ${w.length ? 'AND ' + w.join(' AND ') : ''} ORDER BY c.calldate DESC LIMIT ?`, ...c.params, ...p, limit);
+}
+
+/** Transcribed calls with the full role-labelled text and the analysis. */
+export function transcriptsDetail(f, x = {}, limit = 2000) {
+  const c = callWhere(f);
+  const w = [], p = [];
+  if (x.agent) { w.push('(c.agent_ext=? OR c.agent_name LIKE ?)'); p.push(x.agent, `%${x.agent}%`); }
+  if (x.hits === '1') w.push("a.banned_hits IS NOT NULL AND a.banned_hits <> '[]'");
+  if (x.verdict === 'complaint') w.push('a.is_complaint=1');
+  if (x.verdict === 'violation') w.push('a.agent_violation=1');
+  if (x.verdict === 'clean') w.push("a.provider='anthropic' AND a.is_complaint=0 AND a.agent_violation=0");
+  return q.all(`SELECT c.id 'رقم المكالمة', c.calldate 'التاريخ', c.server_name 'السنترال', COALESCE(c.agent_name, e.agent_name, '') 'المحصل', c.agent_ext 'التحويلة', COALESCE(co.name,'') 'الشركة',
+      c.phone 'رقم العميل', (c.billsec/60)||':'||substr('0'||(c.billsec%60),-2) 'المدة', tr.provider 'مزود التحويل', tr.created_at 'وقت التحويل',
+      (SELECT GROUP_CONCAT(json_extract(h.value,'$.word'), '، ') FROM json_each(COALESCE(a.banned_hits,'[]')) h) 'الكلمات المحظورة',
+      CASE a.is_complaint WHEN 1 THEN 'نعم' WHEN 0 THEN 'لا' END 'شكوى', CASE a.agent_violation WHEN 1 THEN 'نعم' WHEN 0 THEN 'لا' END 'مخالفة محصل',
+      a.violation_type 'نوع المخالفة', a.quality_score 'تقييم الجودة', ${sevCase('a.severity')} 'الخطورة', a.summary 'ملخص الـ AI', a.issues 'ملاحظات', a.recommendations 'توصيات',
+      (SELECT t.id FROM tickets t WHERE t.call_id=c.id ORDER BY t.id DESC LIMIT 1) 'رقم التذكرة',
+      tr.text 'النص الكامل', tr.segments '_segments', tr.speaker_map '_map'
+      FROM transcripts tr JOIN calls c ON c.id=tr.call_id ${CALL_JOINS} LEFT JOIN companies co ON co.id=${CALL_COMPANY} LEFT JOIN analyses a ON a.call_id=c.id
+      ${c.where} ${w.length ? 'AND ' + w.join(' AND ') : ''} ORDER BY c.calldate DESC LIMIT ?`, ...c.params, ...p, limit);
+}
+
+function sevCase(col) { return `CASE ${col} WHEN 'high' THEN 'عالية' WHEN 'medium' THEN 'متوسطة' WHEN 'low' THEN 'منخفضة' ELSE ${col} END`; }
+function statusCase(col, map) { return `CASE ${col} ${Object.entries(map).map(([k, v]) => `WHEN '${k}' THEN '${v}'`).join(' ')} ELSE ${col} END`; }
+
 /** Rough spend estimate: Soniox $0.10/h, Sonnet 5 ~$0.005 per analysed call. */
 export function cost(f) {
   const o = overview(f);

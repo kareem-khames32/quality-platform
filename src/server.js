@@ -335,9 +335,22 @@ function reportFilters(req) {
   }
   return f;
 }
+/** extra row-level filters carried in the query string */
+const extraFilters = (qs) => ({ status: qs.status || '', severity: qs.severity || '', agent: (qs.agent || '').trim(), phone: (qs.phone || '').trim(), min: qs.min || '', hits: qs.hits || '', verdict: qs.verdict || '', source: qs.source || '' });
+/** transcripts come with raw segments; render them as المحصل/العميل text and drop the helper columns */
+function finishTranscripts(rows, labels) {
+  for (const r of rows) {
+    try { const segs = JSON.parse(r._segments || '[]'), map = JSON.parse(r._map || '{}'); if (segs.length) r['النص الكامل'] = formatTranscript(segs, Object.keys(map).length ? map : assignRoles(segs, {}), labels, { withTime: true }); } catch {}
+    try { r['ملاحظات'] = JSON.parse(r['ملاحظات'] || '[]').join('؛ '); r['توصيات'] = JSON.parse(r['توصيات'] || '[]').join('؛ '); } catch {}
+    delete r._segments; delete r._map;
+  }
+  return rows;
+}
+const DETAIL_TABS = ['tickets', 'calls', 'transcripts'];
 app.get('/reports', (req, res) => {
   const f = reportFilters(req);
-  const tab = ['overview', 'agents', 'companies', 'words', 'lifecycle', 'listens', 'servers'].includes(req.query.tab) ? req.query.tab : 'overview';
+  const x = extraFilters(req.query);
+  const tab = ['overview', 'agents', 'companies', 'words', 'lifecycle', 'listens', 'servers', ...DETAIL_TABS].includes(req.query.tab) ? req.query.tab : 'overview';
   const data = { overview: reports.overview(f), cost: reports.cost(f) };
   if (tab === 'overview') { data.daily = reports.daily(f); data.breakdown = reports.breakdown(f); }
   if (tab === 'agents') data.agents = reports.agents(f);
@@ -346,15 +359,23 @@ app.get('/reports', (req, res) => {
   if (tab === 'lifecycle') data.lifecycle = reports.lifecycle(f);
   if (tab === 'listens') data.listens = reports.listens(f);
   if (tab === 'servers') data.servers = reports.servers(f);
+  if (tab === 'tickets') data.rows = reports.ticketsDetail(f, x, 500);
+  if (tab === 'calls') { if (!roleInfo(req.user.role).calls) return res.status(403).render('error', { title: 'غير مصرح', message: 'تقرير المكالمات لفريق الجودة فقط' }); data.rows = reports.callsDetail(f, x, 500); }
+  if (tab === 'transcripts') { if (!roleInfo(req.user.role).calls) return res.status(403).render('error', { title: 'غير مصرح', message: 'تقرير النصوص لفريق الجودة فقط' }); data.rows = finishTranscripts(reports.transcriptsDetail(f, x, 200), getSettings().role_labels); }
   const companiesList = f.companies ? q.all(`SELECT id, name FROM companies WHERE id IN (${f.companies.map(() => '?').join(',')}) ORDER BY name`, ...f.companies) : q.all('SELECT id, name FROM companies ORDER BY name');
   const serversList = q.all('SELECT DISTINCT server_name FROM calls ORDER BY server_name');
-  res.render('reports', { f, tab, data, companiesList, serversList, canSeeCalls: !!roleInfo(req.user.role).calls });
+  res.render('reports', { f, x, tab, data, companiesList, serversList, canSeeCalls: !!roleInfo(req.user.role).calls, STATUS_AR, TICKET_AR });
 });
 app.get('/reports/export.csv', (req, res) => {
   const f = reportFilters(req);
+  const x = extraFilters(req.query);
   const t = String(req.query.table || '');
+  const staff = !!roleInfo(req.user.role).calls;
   const fn = { daily: reports.daily, agents: reports.agents, companies: reports.companies, words: reports.words, listens: reports.listens, servers: reports.servers,
-    resolutions: (x) => reports.lifecycle(x).resolutions, steps: (x) => reports.lifecycle(x).steps }[t];
+    resolutions: (a) => reports.lifecycle(a).resolutions, steps: (a) => reports.lifecycle(a).steps,
+    tickets: (a) => reports.ticketsDetail(a, x, 20000),
+    calls: staff ? (a) => reports.callsDetail(a, x, 50000) : null,
+    transcripts: staff ? (a) => finishTranscripts(reports.transcriptsDetail(a, x, 5000), getSettings().role_labels) : null }[t];
   if (!fn) return res.status(400).send('unknown table');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="report-${t}-${f.from}-${f.to}.csv"`);

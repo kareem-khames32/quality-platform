@@ -1,6 +1,29 @@
 <%- include('partials/header', { title: 'التقارير' }) %>
 <% const qsBase = new URLSearchParams({ from: f.from, to: f.to, server: f.server || '', company: f.company_id || '' }).toString();
-   const tabs = [['overview','📊 نظرة عامة'],['agents','👤 المحصلون'],['companies','🏢 الشركات'],['words','🚫 الكلمات المحظورة'],['lifecycle','🪜 دورة الشكاوى'],['listens','🎧 الاستماع'],['servers','🖥 السناترال']];
+   const tabs = [['overview','📊 نظرة عامة'],['tickets','📋 تفاصيل الشكاوى'],...(canSeeCalls ? [['calls','📞 تفاصيل المكالمات'],['transcripts','📝 النصوص']] : []),['agents','👤 المحصلون'],['companies','🏢 الشركات'],['words','🚫 الكلمات المحظورة'],['lifecycle','🪜 دورة الشكاوى'],['listens','🎧 الاستماع'],['servers','🖥 السناترال']];
+   const xq = new URLSearchParams(Object.fromEntries(Object.entries(x || {}).filter(([k,v]) => v))).toString();
+   const isDetail = ['tickets','calls','transcripts'].includes(tab);
+   function detailTable(rows, opts = {}) {
+     if (!rows.length) return '<p class="muted">لا توجد بيانات مطابقة.</p>';
+     const cols = Object.keys(rows[0]).filter(c => !c.startsWith('_'));
+     const long = new Set(['التفاصيل','النتيجة والإجراء','ملخص الـ AI','النص الكامل','ملاحظات','توصيات','الكلمات المحظورة']);
+     const esc = (v) => String(v ?? '').replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+     let h = '<div class="table-wrap" style="max-height:70vh;overflow:auto"><table><tr>' + cols.map(c => `<th class="nowrap">${c}</th>`).join('') + '</tr>';
+     for (const r of rows) {
+       h += '<tr>' + cols.map(c => {
+         let v = r[c];
+         if (c === 'رقم التذكرة' && v) return `<td><a href="/tickets/${v}">#${v}</a></td>`;
+         if (c === 'رقم المكالمة' && v && opts.callLinks) return `<td><a href="/calls/${v}">${v}</a></td>`;
+         if (long.has(c)) return `<td style="min-width:220px;max-width:420px;white-space:pre-wrap;font-size:.82rem;line-height:1.6">${esc(v).slice(0, c === 'النص الكامل' ? 600 : 400)}${String(v||'').length > (c === 'النص الكامل' ? 600 : 400) ? '…' : ''}</td>`;
+         if (/تاريخ|فُتحت|أُغلقت|المهلة|وقت/.test(c)) return `<td class="nowrap"><span class="dt">${esc(v)}</span></td>`;
+         if (c === 'الحالة') return `<td class="nowrap"><span class="badge">${esc(v)}</span></td>`;
+         if (c === 'الخطورة') return `<td><span class="chip ${v === 'عالية' ? 'high' : v === 'متوسطة' ? 'medium' : 'low'}">${esc(v)}</span></td>`;
+         if (c === 'متأخرة' && v) return `<td><span class="badge red">${esc(v)}</span></td>`;
+         return `<td class="nowrap">${esc(v)}</td>`;
+       }).join('') + '</tr>';
+     }
+     return h + '</table></div>';
+   }
    const n = (v) => (v == null ? '—' : Number(v).toLocaleString('en'));
    const pct = (a, b) => (b ? Math.round((a || 0) / b * 100) : 0);
    function bars(rows, key, label) { const mx = Math.max(1, ...rows.map(r => r[key] || 0)); let h = '<table>'; for (const r of rows) { h += `<tr><td style="width:40%">${r[label]}</td><td><div class="bar"><div style="width:${Math.round((r[key]||0)/mx*100)}%"></div></div></td><td style="width:70px"><b>${n(r[key])}</b></td></tr>`; } return h + '</table>'; }
@@ -59,6 +82,38 @@
       <div><div class="card-title">😐 مزاج العملاء</div><% if (!data.breakdown.sent.length) { %><p class="muted">—</p><% } else { %><%- bars(data.breakdown.sent, 'n', 'label') %><% } %></div>
     </div>
   </div>
+</div>
+<% } %>
+
+<% if (isDetail) { %>
+<div class="card">
+  <form method="GET" action="/reports" class="row">
+    <input type="hidden" name="tab" value="<%= tab %>"><input type="hidden" name="from" value="<%= f.from %>"><input type="hidden" name="to" value="<%= f.to %>"><input type="hidden" name="company" value="<%= f.company_id || '' %>"><input type="hidden" name="server" value="<%= f.server || '' %>">
+    <% if (tab === 'tickets') { %>
+      <div><label>حالة التذكرة</label><select name="status"><option value="all" <%= x.status==='all'||!x.status?'selected':'' %>>الكل</option><option value="active" <%= x.status==='active'?'selected':'' %>>المفتوحة وقيد المعالجة</option><% for (const [k,v] of Object.entries(TICKET_AR)) { %><option value="<%= k %>" <%= x.status===k?'selected':'' %>><%= v %></option><% } %></select></div>
+      <div><label>الخطورة</label><select name="severity"><option value="">الكل</option><option value="high" <%= x.severity==='high'?'selected':'' %>>عالية</option><option value="medium" <%= x.severity==='medium'?'selected':'' %>>متوسطة</option><option value="low" <%= x.severity==='low'?'selected':'' %>>منخفضة</option></select></div>
+      <div><label>المصدر</label><select name="source"><option value="">الكل</option><option value="auto" <%= x.source==='auto'?'selected':'' %>>تلقائي</option><option value="manual" <%= x.source==='manual'?'selected':'' %>>يدوي</option></select></div>
+      <div><label>المحصل (اسم أو تحويلة)</label><input type="text" name="agent" value="<%= x.agent %>"></div>
+    <% } else if (tab === 'calls') { %>
+      <div><label>حالة المكالمة</label><select name="status"><option value="">الكل</option><% for (const [k,v] of Object.entries(STATUS_AR)) { %><option value="<%= k %>" <%= x.status===k?'selected':'' %>><%= v %></option><% } %></select></div>
+      <div><label>المحصل (اسم أو تحويلة)</label><input type="text" name="agent" value="<%= x.agent %>"></div>
+      <div><label>رقم العميل</label><input type="text" name="phone" value="<%= x.phone %>"></div>
+      <div><label>أطول من (ثانية)</label><input type="number" name="min" value="<%= x.min %>" min="0"></div>
+      <div><label>كلمات محظورة</label><select name="hits"><option value="">الكل</option><option value="1" <%= x.hits==='1'?'selected':'' %>>فيها كلمات محظورة فقط</option></select></div>
+    <% } else { %>
+      <div><label>المحصل (اسم أو تحويلة)</label><input type="text" name="agent" value="<%= x.agent %>"></div>
+      <div><label>نتيجة الـ AI</label><select name="verdict"><option value="">الكل</option><option value="complaint" <%= x.verdict==='complaint'?'selected':'' %>>شكوى مؤكدة</option><option value="violation" <%= x.verdict==='violation'?'selected':'' %>>مخالفة محصل</option><option value="clean" <%= x.verdict==='clean'?'selected':'' %>>سليمة بعد المراجعة</option></select></div>
+      <div><label>كلمات محظورة</label><select name="hits"><option value="">الكل</option><option value="1" <%= x.hits==='1'?'selected':'' %>>فيها كلمات محظورة فقط</option></select></div>
+    <% } %>
+    <div style="flex:0"><button class="btn">تصفية</button></div>
+  </form>
+</div>
+<div class="card">
+  <div class="card-title" style="justify-content:space-between">
+    <span><%= tabs.find(t => t[0] === tab)[1] %> <span class="badge"><%= data.rows.length %><%= data.rows.length >= (tab === 'transcripts' ? 200 : 500) ? '+' : '' %></span> <span class="muted">الشاشة بتعرض أول <%= tab === 'transcripts' ? 200 : 500 %> سطر، الـ Excel بينزّل الكل</span></span>
+    <a class="btn secondary sm" href="/reports/export.csv?table=<%= tab %>&<%= qsBase %>&<%= xq %>">⬇ Excel (كامل)</a>
+  </div>
+  <%- detailTable(data.rows, { callLinks: canSeeCalls }) %>
 </div>
 <% } %>
 
