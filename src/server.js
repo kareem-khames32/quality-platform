@@ -9,7 +9,7 @@ import { config, saveConfigPatch, ROOT } from './config.js';
 import { db, q, getSettings, setSetting, seedDefaults, DEFAULT_SETTINGS } from './db.js';
 import { ensureAdmin, sessionMiddleware, requireLogin, requireRole, requireCap, createSession, destroySession, hashPassword, verifyPassword, checkLock, noteFailure, clearFailures, ticketScopeSql, canActOnTicket, ROLES, roleInfo, normalizeRole } from './auth.js';
 import { runCollectorLoop, collectAll, probeWarehouses, evaluateRules } from './collector.js';
-import { runWorkerLoop, queueCall, queueStats, queueForAI, retryFailed, laneInfo, requeueFlaggedWithoutAI, kick } from './worker.js';
+import { runWorkerLoop, queueCall, queueStats, queueForAI, retryFailed, laneInfo, requeueFlaggedWithoutAI, kick, FAILED_REASON_SQL } from './worker.js';
 import { health, circuitView, forceProbe, LEGACY_PROVIDER_ERROR_SQL } from './resilience.js';
 import { startMaintenance, maintenanceInfo, backupNow } from './maintenance.js';
 import { streamRecording, resolveRecording, probeGateway, recordingSource } from './gateway.js';
@@ -73,12 +73,14 @@ app.use((req, res, next) => {
   res.locals.user = req.user; res.locals.path = req.path; res.locals.msg = req.query.msg || null; res.locals.err = req.query.err || null;
   res.locals.fmtDuration = fmtDuration; res.locals.warehouses = config.warehouses;
   res.locals.providers = { stt: sttReady() ? config.stt.provider : null, llm: llmReady() ? config.llm.provider : null, gateway: recordingSource() === 'gateway' ? !!config.gateway.api_key : loadBranches().length > 0, source: recordingSource() };
-  res.locals.openTickets = req.user ? q.one(`SELECT COUNT(*) c FROM tickets t WHERE t.status IN ('open','in_progress') AND ${ticketScopeSql(req.user).sql}`, ...ticketScopeSql(req.user).params).c : 0;
-  res.locals.unread = req.user ? unreadCount(req.user.id) : 0;
+  // JSON endpoints never render the header: skip the per-request badge queries (polled every few seconds by every tab)
+  const page = !!req.user && !req.path.startsWith('/api/') && req.path !== '/healthz';
+  res.locals.openTickets = page ? q.one(`SELECT COUNT(*) c FROM tickets t WHERE t.status IN ('open','in_progress') AND ${ticketScopeSql(req.user).sql}`, ...ticketScopeSql(req.user).params).c : 0;
+  res.locals.unread = page ? unreadCount(req.user.id) : 0;
   res.locals.providers.smtp = smtpReady();
   res.locals.isStaff = !!req.user && !!roleInfo(req.user.role).calls;
   res.locals.ROLES = ROLES;
-  res.locals.systemAlerts = req.user ? systemAlerts(req.user) : [];
+  res.locals.systemAlerts = page ? systemAlerts(req.user) : [];
   next();
 });
 
@@ -212,8 +214,13 @@ app.get('/api/queue.json', (req, res) => {
 app.post('/calls/:id/reanalyze', staffOnly, async (req, res) => {
   const id = Number(req.params.id);
   try {
-    // through the AI lane: protected by the circuit breaker, queued if the AI is temporarily down
-    if (llmReady() && queueForAI(id, req.user.id)) return res.redirect(`/calls/${id}?msg=${encodeURIComponent('أُرسلت للذكاء الاصطناعي، النتيجة هتظهر هنا تلقائياً')}`);
+    // through the AI lane: protected by the circuit breaker, queued if the AI is temporarily down; never a parallel keyword run
+    if (llmReady()) {
+      const n = queueForAI(id, req.user.id);
+      return res.redirect(`/calls/${id}?${n ? 'msg=' + encodeURIComponent('أُرسلت للذكاء الاصطناعي، النتيجة هتظهر هنا تلقائياً') : 'err=' + encodeURIComponent('المكالمة بتتحلل دلوقتي بالفعل أو مالهاش نص')}`);
+    }
+    const st = q.one('SELECT status FROM calls WHERE id=?', id)?.status;
+    if (['awaiting_ai', 'analyzing', 'transcribing'].includes(st)) return res.redirect(`/calls/${id}?err=${encodeURIComponent('المكالمة بتتحلل دلوقتي بالفعل')}`);
     await analyzeCall(id, { skipLLM: true });
     res.redirect(`/calls/${id}?msg=${encodeURIComponent('تمت إعادة التحليل بالكلمات المحظورة')}`);
   } catch (e) { res.redirect(`/calls/${id}?err=${encodeURIComponent(e.message)}`); }
@@ -546,9 +553,7 @@ function systemData() {
       SUM(status='awaiting_ai') awaiting_ai, SUM(status='transcribing') transcribing, SUM(status='analyzing') analyzing,
       SUM(status='failed') failed, SUM(status='skipped' AND skip_reason='empty_audio') empty_audio
       FROM calls WHERE status IN ('queued','awaiting_ai','transcribing','analyzing','failed','skipped')`, now, wait10, now, wait10, now);
-  const failures = q.all(`SELECT CASE WHEN error LIKE '%recording not found%' THEN 'not_found'
-        WHEN (error LIKE '%EHOST%' OR error LIKE '%ECONN%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%timeout%' OR error LIKE '%login failed%' OR error LIKE '%fetch failed%') THEN 'network'
-        WHEN ${LEGACY_PROVIDER_ERROR_SQL} THEN 'provider' ELSE 'other' END reason, COUNT(*) n, MAX(substr(error,1,160)) sample
+  const failures = q.all(`SELECT ${FAILED_REASON_SQL} reason, COUNT(*) n, MAX(substr(error,1,160)) sample
       FROM calls WHERE status='failed' GROUP BY reason ORDER BY n DESC`);
   const throughput = {
     stt_1h: q.one('SELECT COUNT(*) c FROM transcripts WHERE created_at >= ?', h1).c,
@@ -582,7 +587,7 @@ admin.post('/system/retry-failed', (req, res) => {
 });
 admin.post('/system/rerun-ai', (req, res) => {
   if (!llmReady()) return res.redirect('/admin/system?err=' + encodeURIComponent('مزود الذكاء الاصطناعي غير مضبوط'));
-  const n = requeueFlaggedWithoutAI();
+  const n = requeueFlaggedWithoutAI({ all: true });
   res.redirect('/admin/system?msg=' + encodeURIComponent(`أُرسلت ${n} مكالمة معلّمة للذكاء الاصطناعي`));
 });
 admin.post('/system/settings', (req, res) => {
@@ -595,8 +600,8 @@ admin.post('/system/settings', (req, res) => {
   kick();
   res.redirect('/admin/system?msg=' + encodeURIComponent('تم حفظ إعدادات التشغيل'));
 });
-admin.post('/system/backup', (req, res) => {
-  try { const r = backupNow(); res.redirect('/admin/system?msg=' + encodeURIComponent(`تم أخذ نسخة احتياطية (${r.size_mb} MB)`)); }
+admin.post('/system/backup', async (req, res) => {
+  try { const r = await backupNow(); res.redirect('/admin/system?msg=' + encodeURIComponent(`تم أخذ نسخة احتياطية (${r.size_mb} MB)`)); }
   catch (e) { res.redirect('/admin/system?err=' + encodeURIComponent('فشل النسخ الاحتياطي: ' + e.message)); }
 });
 

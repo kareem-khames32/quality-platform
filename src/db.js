@@ -137,11 +137,14 @@ addColumn('analyses', 'ticket_reason', 'TEXT');
 addColumn('tickets', 'step_role', 'TEXT');        // role that owns the current step (quality_specialist | quality_manager | customer_care | sector_manager)
 addColumn('tickets', 'resolution', 'TEXT');       // closing feedback + actions taken
 addColumn('companies', 'notify_emails', 'TEXT');   // comma-separated extra recipients
+addColumn('calls', 'provider_failures', 'INTEGER NOT NULL DEFAULT 0');   // provider-class failures of this call (poison-probe guard)
+addColumn('calls', 'last_error_kind', 'TEXT');                            // retries count consecutive failures of one kind
 addColumn('calls', 'ai_retries', 'INTEGER NOT NULL DEFAULT 0');   // AI lane attempts that failed for call-specific reasons
 addColumn('calls', 'ai_since', 'TEXT');                           // when the call started waiting for the AI lane
 db.exec(`
 CREATE INDEX IF NOT EXISTS ix_calls_status_date ON calls(status, calldate);
 CREATE INDEX IF NOT EXISTS ix_transcripts_created ON transcripts(created_at);
+CREATE INDEX IF NOT EXISTS ix_ticket_events_ticket ON ticket_events(ticket_id, user_id);
 CREATE TABLE IF NOT EXISTS soniox_leftovers (kind TEXT NOT NULL, id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (kind, id));
 `);
 

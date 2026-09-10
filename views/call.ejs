@@ -29,7 +29,7 @@
       <% if (!['transcribing','analyzing'].includes(call.status)) { %>
       <form method="POST" action="/calls/<%= call.id %>/transcribe" class="inline-form"><button class="btn" <%= !providers.stt ? 'title="مزود STT غير مضبوط"' : '' %>>🎙 <%= transcript ? 'أعد التحويل لنص' : 'حوّل لنص' %></button></form>
       <% } %>
-      <% if (transcript) { %><form method="POST" action="/calls/<%= call.id %>/reanalyze" class="inline-form"><button class="btn secondary">🔁 أعد التحليل</button></form><% } %>
+      <% if (transcript && !['awaiting_ai','analyzing','transcribing'].includes(call.status)) { %><form method="POST" action="/calls/<%= call.id %>/reanalyze" class="inline-form"><button class="btn secondary">🔁 أعد التحليل</button></form><% } %>
       <form method="POST" action="/calls/<%= call.id %>/resolve" class="inline-form"><button class="btn secondary">🔎 حدّد التسجيل</button></form>
     </div>
     <% if (!rule.queue && call.status === 'new') { %><p class="muted" style="margin-top:.5rem">القواعد الحالية لا تحوّل هذه المكالمة تلقائياً (<%= rule.reason %>).</p><% } %>
@@ -47,7 +47,7 @@
       <% if (analysis.sentiment) { %><b>مزاج العميل</b><span><%= {positive:'إيجابي',neutral:'محايد',negative:'سلبي'}[analysis.sentiment] %></span><% } %>
       <% if (analysis.employee_mentioned) { %><b>موظف مذكور</b><span><%= analysis.employee_mentioned %></span><% } %>
       <% if (analysis.company_mentioned) { %><b>شركة مذكورة</b><span><%= analysis.company_mentioned %></span><% } %>
-      <b>المحلل</b><span class="muted"><%= ({ pending_ai: '⏳ بانتظار الذكاء الاصطناعي', keywords_only: 'الكلمات المحظورة فقط', keywords_fallback: 'الكلمات المحظورة (الـ AI كان متوقف)' })[analysis.provider] || analysis.provider %> <%= analysis.model || '' %> · <span class="dt"><%= analysis.created_at %></span></span>
+      <b>المحلل</b><span class="muted"><%= ({ pending_ai: '⏳ بانتظار الذكاء الاصطناعي', keywords_only: 'الكلمات المحظورة فقط', keywords_fallback: 'الكلمات المحظورة (الـ AI كان متوقف)', keywords_ai_failed: 'الكلمات المحظورة (تعذر تحليل الـ AI لهذه المكالمة)' })[analysis.provider] || analysis.provider %> <%= analysis.model || '' %> · <span class="dt"><%= analysis.created_at %></span></span>
     </div>
     <% if (analysis.summary) { %><p style="margin-top:.75rem;line-height:1.8"><%= analysis.summary %></p><% } %>
     <% if (analysis.banned_hits.length) { %>

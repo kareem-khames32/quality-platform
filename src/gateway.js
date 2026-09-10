@@ -112,14 +112,17 @@ async function resolveViaBranches(call) {
   const settled = await Promise.allSettled(targets.map(async (b) => ({ b, files: await searchBranch(b, params) })));
   // prefer a uniqueid hit anywhere; fall back to the best time match
   let fallback = null;
+  const rejected = [];
   for (const s of settled) {
-    if (s.status !== 'fulfilled') { log(`search ${s.reason?.message || s.reason}`); continue; }
+    if (s.status !== 'fulfilled') { rejected.push(String(s.reason?.message || s.reason).slice(0, 120)); log(`search ${s.reason?.message || s.reason}`); continue; }
     const m = pickMatch(call, s.value.files);
     if (!m) continue;
     if (m._how === 'uniqueid') return { branch: s.value.b.id, filepath: fileOf(m), how: m._how };
     if (!fallback) fallback = { branch: s.value.b.id, filepath: fileOf(m), how: m._how };
   }
   if (fallback) return fallback;
+  // a branch that could not be asked is an outage, not a missing recording (different retry policy, not charged to "not found")
+  if (rejected.length) throw new Error(`branch unreachable: ${rejected.join(' | ')}`);
   throw new Error('recording not found on any branch');
 }
 
@@ -128,13 +131,15 @@ async function resolveViaGateway(call) {
   const params = new URLSearchParams({ query: call.phone || call.dst_raw || '', date_from: day, date_to: day, sort: 'recent', page: '1' });
   const branches = candidateBranches(call.server_name);
   if (branches.length) {
+    const rejected = [];
     for (const b of branches) {
       params.set('branch', b);
       try {
         const m = pickMatch(call, extractResults(await getJson(`/api/v1/search?${params}`)).map((f) => ({ ...f, _branch: f._branch || b })));
         if (m) return { branch: b, filepath: fileOf(m), how: m._how };
-      } catch (e) { log(`gateway search ${b} failed: ${e.message}`); }
+      } catch (e) { rejected.push(`${b}: ${String(e.message).slice(0, 100)}`); log(`gateway search ${b} failed: ${e.message}`); }
     }
+    if (rejected.length) throw new Error(`branch unreachable (gateway): ${rejected.join(' | ')}`);
     throw new Error('recording not found on gateway');
   }
   const m = pickMatch(call, extractResults(await getJson(`/api/v1/search?${params}`)));

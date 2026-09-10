@@ -1,13 +1,14 @@
 /**
  * Resilience core: error classification, per-provider circuit breakers, loop heartbeats and admin alerts.
  *
- * Provider-level problems (no balance, bad key, storage/quota full, rate limit, provider outage, network to the
- * provider) must never be charged to individual calls. They open the provider's circuit: the lane pauses, every
- * call stays queued, and after a back-off one "probe" call is let through. Success closes the circuit and the
- * lane resumes at full speed; failure re-opens it with a longer back-off. State is persisted so a restart does
- * not hammer a provider that is known to be broken, and admins are alerted once per incident.
+ * Provider-level problems (no balance, bad key, storage/quota full, rejected configuration, rate limit, provider
+ * outage, network to the provider) must never be charged to individual calls. They open the provider's circuit:
+ * the lane pauses, every call stays queued, and after a back-off one "probe" call is let through. A success from a
+ * call dispatched after the outage began closes the circuit and the lane resumes; failure re-opens it with a longer
+ * back-off. State is persisted so a restart does not hammer a broken provider. Admins are alerted when a person has
+ * to act (balance, key, quota, configuration) - with a reminder every 6 hours - and told when it recovers.
  */
-import { db, q, getSettings, setSetting } from './db.js';
+import { q, getSettings, setSetting } from './db.js';
 import { nowIso } from './util.js';
 
 const log = (...a) => console.log(new Date().toISOString(), '[resilience]', ...a);
@@ -17,7 +18,7 @@ const log = (...a) => console.log(new Date().toISOString(), '[resilience]', ...a
 export class ProviderError extends Error {
   /**
    * @param {'stt'|'llm'} provider
-   * @param {'billing'|'auth'|'quota'|'rate_limit'|'provider_down'|'network'} kind
+   * @param {'billing'|'auth'|'quota'|'config'|'rate_limit'|'provider_down'|'network'} kind
    */
   constructor(provider, kind, message) {
     super(message);
@@ -28,14 +29,16 @@ export class ProviderError extends Error {
 }
 
 export const KIND_AR = {
-  billing: 'الرصيد نفد أو الميزانية انتهت عند المزود',
+  billing: 'الرصيد نفد أو حد الإنفاق/الميزانية انتهى عند المزود',
   auth: 'مفتاح الـ API غير صحيح أو موقوف',
   quota: 'تم تجاوز حد التخزين أو عدد الطلبات عند المزود',
+  config: 'المزود بيرفض الإعدادات (موديل / لغة / باراميتر غير صحيح)',
   rate_limit: 'تجاوز معدل الطلبات المسموح مؤقتاً',
-  provider_down: 'خدمة المزود متعطلة مؤقتاً',
+  provider_down: 'خدمة المزود متعطلة أو بطيئة جداً مؤقتاً',
   network: 'تعذر الاتصال بالمزود (شبكة / إنترنت)',
 };
 export const PROVIDER_AR = { stt: 'تحويل الصوت لنص (Soniox)', llm: 'الذكاء الاصطناعي (Claude)' };
+const HUMAN_KINDS = new Set(['billing', 'auth', 'quota', 'config']);   // somebody has to act
 
 /**
  * Classify any error thrown while processing one call.
@@ -45,8 +48,8 @@ export function classifyCallError(e) {
   if (e && (e instanceof ProviderError || e.name === 'ProviderError')) return { scope: 'provider', kind: e.kind, provider: e.provider };
   const m = String(e?.message || e || '');
   if (/invalid_audio_file|No audio found|audio (is )?(too short|empty)/i.test(m)) return { scope: 'call', kind: 'bad_audio' };
+  if (/branch unreachable|EHOSTUNREACH|ECONNREFUSED|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|ENETUNREACH|socket hang up|gateway timeout|timeout http|login failed|branch returned 5\d\d|upstream 5\d\d|search \d{3}/i.test(m)) return { scope: 'call', kind: 'recording_net' };
   if (/recording not found/i.test(m)) return { scope: 'call', kind: 'not_found' };
-  if (/EHOSTUNREACH|ECONNREFUSED|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|ENETUNREACH|socket hang up|gateway timeout|timeout http|login failed|branch returned 5\d\d|upstream 5\d\d|search \d{3}/i.test(m)) return { scope: 'call', kind: 'recording_net' };
   if (/LLM (refused|returned no)|ZodError|Unexpected token|JSON/i.test(m)) return { scope: 'call', kind: 'llm_output' };
   return { scope: 'call', kind: 'other' };
 }
@@ -68,18 +71,19 @@ const FAST = process.env.CQ_TEST_FAST === '1';   // test harness only: seconds i
 const BACKOFF = {
   billing: [120, 300, 600, 900],
   auth: [120, 300, 600, 900],
+  config: [120, 300, 600, 900],
   quota: [30, 90, 300, 600],
   rate_limit: [20, 60, 180, 300],
   provider_down: [30, 90, 300, 600],
   network: [30, 90, 300, 600],
 };
-const blank = () => ({ state: 'closed', kind: null, message: null, since: null, until: 0, trips: 0, probing: false, last_ok_at: null, last_error_at: null });
+const blank = () => ({ state: 'closed', kind: null, message: null, since: null, openedAt: 0, until: 0, trips: 0, probing: false, alerted: false, last_ok_at: null, lastOkMs: 0, last_error_at: null });
 
 function restore(p) {
   try {
     const s = getSettings()[`circuit_${p}`];
     // a restart re-checks a broken provider after 15s instead of trusting the old back-off
-    if (s && s.state && s.state !== 'closed') return { ...blank(), ...s, state: 'open', until: Date.now() + (FAST ? 1000 : 15000), probing: false };
+    if (s && s.state && s.state !== 'closed') return { ...blank(), ...s, state: 'open', until: Date.now() + (FAST ? 1000 : 15000), probing: false, openedAt: s.openedAt || Date.now() };
   } catch {}
   return blank();
 }
@@ -88,7 +92,7 @@ const recoverHooks = { stt: [], llm: [] };
 
 function persist(p) {
   const c = circuits[p];
-  try { setSetting(`circuit_${p}`, { state: c.state, kind: c.kind, message: c.message, since: c.since, until: c.until, trips: c.trips, last_ok_at: c.last_ok_at, last_error_at: c.last_error_at }); }
+  try { setSetting(`circuit_${p}`, { state: c.state, kind: c.kind, message: c.message, since: c.since, openedAt: c.openedAt, until: c.until, trips: c.trips, alerted: c.alerted, last_ok_at: c.last_ok_at, last_error_at: c.last_error_at }); }
   catch (e) { log('persist failed', e.message); }
 }
 
@@ -96,6 +100,10 @@ function persist(p) {
 export function onRecover(p, fn) { recoverHooks[p].push(fn); }
 
 export function circuitState(p) { return circuits[p].state; }
+/** How long the provider has been paused (0 when working). */
+export function circuitOpenForMs(p) { const c = circuits[p]; return c.state === 'closed' ? 0 : Date.now() - (c.openedAt || Date.now()); }
+/** Wall-clock ms of the provider's last successful call (0 = none since start). */
+export function lastSuccessMs(p) { return circuits[p].lastOkMs || 0; }
 
 /**
  * May the lane dispatch one more call to this provider right now?
@@ -114,15 +122,20 @@ export function circuitAllows(p) {
   return false;
 }
 
-export function recordSuccess(p) {
+/**
+ * A call to the provider succeeded. `dispatchedAt` is when that call was sent: a success from a call that was sent
+ * BEFORE the outage started proves nothing (it was accepted while the provider still worked), so it doesn't close.
+ */
+export function recordSuccess(p, dispatchedAt = Date.now()) {
   const c = circuits[p];
-  c.last_ok_at = nowIso();
-  if (c.state === 'closed') return;
-  const was = { kind: c.kind, since: c.since };
-  Object.assign(c, { state: 'closed', kind: null, message: null, until: 0, trips: 0, probing: false });
+  c.last_ok_at = nowIso(); c.lastOkMs = Date.now();
+  if (c.state === 'closed' || dispatchedAt < c.openedAt) return;
+  const was = { kind: c.kind, since: c.since, alerted: c.alerted };
+  Object.assign(c, { state: 'closed', kind: null, message: null, until: 0, trips: 0, probing: false, alerted: false, openedAt: 0 });
   persist(p);
   log(`${p}: provider recovered, lane resumes`);
-  alertOnce(`recovered:${p}`, 1, () => notifyAdminsLazy({ kind: 'system', subject: `${PROVIDER_AR[p]} رجع يشتغل`, text: `✅ ${PROVIDER_AR[p]} رجع يشتغل تلقائياً بعد توقف (${KIND_AR[was.kind] || was.kind}) منذ ${was.since}. المكالمات المنتظرة بتكمل دلوقتي.` }));
+  // only announce recovery when admins were told it was down (no all-clear spam for short rate-limit blips)
+  if (was.alerted) notifyAdminsLazy({ kind: 'system', subject: `${PROVIDER_AR[p]} رجع يشتغل`, text: `✅ ${PROVIDER_AR[p]} رجع يشتغل تلقائياً بعد توقف (${KIND_AR[was.kind] || was.kind}) منذ ${was.since}. المكالمات المنتظرة بتكمل دلوقتي.` });
   for (const fn of recoverHooks[p]) { try { fn(); } catch (e) { log('recover hook failed', e.message); } }
 }
 
@@ -132,19 +145,33 @@ export function recordFailure(p, err) {
   const msg = String(err?.message || err).slice(0, 400);
   c.last_error_at = nowIso();
   // several in-flight calls usually fail together: only the first one moves the circuit
-  if (c.state === 'open' && Date.now() < c.until) { c.message = msg; return; }
+  if (c.state === 'open' && Date.now() < c.until) {
+    c.message = msg;
+    if (HUMAN_KINDS.has(kind) && c.kind !== kind) { c.kind = kind; maybeAlert(p, c, kind, msg, false); persist(p); }
+    return;
+  }
   const wasClosed = c.state === 'closed';
   c.trips = wasClosed ? 1 : c.trips + 1;
   const steps = BACKOFF[kind] || BACKOFF.provider_down;
   const sec = FAST ? 2 : steps[Math.min(c.trips - 1, steps.length - 1)];
-  Object.assign(c, { state: 'open', kind, message: msg, until: Date.now() + sec * 1000, probing: false, since: wasClosed ? nowIso() : (c.since || nowIso()) });
+  Object.assign(c, {
+    state: 'open', kind, message: msg, until: Date.now() + sec * 1000, probing: false,
+    since: wasClosed ? nowIso() : (c.since || nowIso()), openedAt: wasClosed ? Date.now() : (c.openedAt || Date.now()),
+  });
+  maybeAlert(p, c, kind, msg, wasClosed);
   persist(p);
   log(`${p}: circuit OPEN (${kind}) for ${sec}s — ${msg}`);
-  // alert once per incident (rate limits are noisy: only after repeated trips)
-  if (wasClosed && kind !== 'rate_limit' || (kind === 'rate_limit' && c.trips === 3)) {
-    alertOnce(`paused:${p}:${kind}`, 60, () => notifyAdminsLazy({ kind: 'system', subject: `${PROVIDER_AR[p]} متوقف مؤقتاً`,
-      text: `⚠️ ${PROVIDER_AR[p]} متوقف مؤقتاً: ${KIND_AR[kind] || kind}.\nالمكالمات محفوظة في الانتظار ومش هتفشل، والنظام بيعيد المحاولة تلقائياً ويكمل أول ما المزود يرجع.\nالتفاصيل: ${msg}` }));
-  }
+}
+
+function maybeAlert(p, c, kind, msg, wasClosed) {
+  let send, everyMin = 60;
+  if (HUMAN_KINDS.has(kind)) { send = true; everyMin = 360; }   // needs a person: alert now (also when the kind changes), remind every 6 h
+  else if (kind === 'rate_limit') send = c.trips >= 3;           // short rate limits are normal under load
+  else send = wasClosed || c.trips === 3;                        // outage / network: once, and again if it persists
+  if (!send) return;
+  const sent = alertOnce(`paused:${p}:${kind}`, everyMin, () => notifyAdminsLazy({ kind: 'system', subject: `${PROVIDER_AR[p]} متوقف مؤقتاً`,
+    text: `⚠️ ${PROVIDER_AR[p]} متوقف مؤقتاً: ${KIND_AR[kind] || kind}.\nالمكالمات محفوظة في الانتظار ومش هتفشل، والنظام بيعيد المحاولة تلقائياً ويكمل أول ما المزود يرجع.${HUMAN_KINDS.has(kind) ? '\nمحتاج تدخل منكم (رصيد / مفتاح / إعدادات).' : ''}\nالتفاصيل: ${msg}` }));
+  if (sent) c.alerted = true;
 }
 
 /** A probe call ended without reaching the provider (e.g. recording missing): let the next call probe. */
@@ -161,7 +188,7 @@ export function forceProbe(p) {
 
 export function circuitView(p) {
   const c = circuits[p];
-  const left = c.state === 'closed' ? 0 : Math.max(0, Math.round((c.until - Date.now()) / 1000));
+  const left = c.state === 'closed' ? 0 : Math.max(0, Math.ceil((c.until - Date.now()) / 1000));
   return { provider: p, label: PROVIDER_AR[p], state: c.state, kind: c.kind, reason: c.kind ? (KIND_AR[c.kind] || c.kind) : null, message: c.message, since: c.since, retry_in_sec: left, trips: c.trips, last_ok_at: c.last_ok_at, last_error_at: c.last_error_at };
 }
 
@@ -188,7 +215,7 @@ export function health({ collectorIntervalSec = 300 } = {}) {
 /* ============================== alerts ============================== */
 
 const lastAlert = new Map();
-/** Run fn at most once per `minutes` for the same key (across the whole process). */
+/** Run fn at most once per `minutes` for the same key (across the whole process). Returns true when it ran. */
 export function alertOnce(key, minutes, fn) {
   const t = lastAlert.get(key) || 0;
   if (Date.now() - t < minutes * 60000) return false;

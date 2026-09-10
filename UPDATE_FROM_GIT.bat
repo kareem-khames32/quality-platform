@@ -19,7 +19,7 @@ where git >nul 2>&1
 if errorlevel 1 ( echo [ERROR] git not found in PATH. & pause & exit /b 1 )
 
 REM pause the watchdog while we update
-echo.> "%APP%maintenance.flag"
+> "%APP%maintenance.flag" echo update
 
 echo Pulling latest code...
 git pull --ff-only
@@ -31,8 +31,17 @@ if errorlevel 1 ( echo [ERROR] npm install failed. & del "%APP%maintenance.flag"
 
 echo Re-applying service settings and restarting...
 call "%APP%INSTALL_SERVICE.bat" quiet
+if errorlevel 1 (
+  if exist "%APP%maintenance.flag" del "%APP%maintenance.flag"
+  echo.
+  echo [ERROR] The new version did not come up healthy - see the lines above and logsplatform-error.log.
+  echo         The watchdog keeps trying to start it every 5 minutes.
+  pause
+  exit /b 1
+)
 if exist "%APP%maintenance.flag" del "%APP%maintenance.flag"
 
 echo.
-echo Update finished. Health check: http://127.0.0.1:8090/healthz
+echo Update finished: the service is running and healthy.
+echo Health check: http://127.0.0.1:8090/healthz
 pause

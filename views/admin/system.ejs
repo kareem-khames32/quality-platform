@@ -48,7 +48,7 @@
       <tr><th>السبب</th><th>العدد</th><th>مثال</th><th></th></tr>
       <% for (const f of failures) { %>
       <tr><td><b><%= REASON_AR[f.reason] || f.reason %></b></td><td><%= n(f.n) %></td><td class="muted" style="font-size:.75rem;direction:ltr;text-align:left;max-width:280px;word-break:break-word"><%= f.sample %></td>
-        <td><form method="POST" action="/admin/system/retry-failed" class="inline-form"><input type="hidden" name="which" value="<%= f.reason === 'other' ? 'all' : f.reason %>"><button class="btn secondary sm">↻ أعد المحاولة</button></form></td></tr>
+        <td><form method="POST" action="/admin/system/retry-failed" class="inline-form"><input type="hidden" name="which" value="<%= f.reason %>"><button class="btn secondary sm">↻ أعد المحاولة</button></form></td></tr>
       <% } %>
     </table>
     <form method="POST" action="/admin/system/retry-failed" style="margin-top:.6rem" onsubmit="return confirm('إعادة كل المكالمات الفاشلة للطابور؟')"><input type="hidden" name="which" value="all"><button class="btn secondary sm">↻ أعد كل الفاشلة</button></form>
@@ -73,6 +73,7 @@
       <b>الذكاء الاصطناعي</b><span><%= age(hb.ai) %></span>
       <b>سحب المكالمات</b><span><%= age(hb.collector) %></span>
       <b>قاعدة البيانات</b><span><%= health.db ? 'سليمة' : 'مشكلة' %></span>
+      <b>مراقب الخدمة</b><span><% if (maint.watchdog === true) { %><span class="badge green">مثبت</span><% } else if (maint.watchdog === false) { %><span class="badge red">غير مثبت</span> <span class="muted">شغّل INSTALL_SERVICE.bat كـ Administrator</span><% } else { %>—<% } %></span>
     </div>
     <p class="muted" style="margin-top:.5rem">مراقب الخدمة (Watchdog) بيعيد تشغيل النظام تلقائياً لو أي جزء وقف أكثر من 10 دقائق، والخدمة بتقوم لوحدها بعد إعادة تشغيل السيرفر.</p>
   </div>

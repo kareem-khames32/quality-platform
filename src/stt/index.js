@@ -171,8 +171,12 @@ async function transcribeSoniox(audio) {
     if (st.status === 'error') {
       const et = st.error_type || '';
       const msg = `Soniox error: ${et} ${st.error_message || ''}`.trim();
+      // allow-list: only problems with THIS audio (or this file) are call-level; anything else is about Soniox and pauses the lane
+      if (/invalid_audio|no_audio|audio_too_(short|long)|unsupported|empty|corrupt|decode/i.test(et) || /No audio found|invalid audio/i.test(msg)) throw new Error(msg);
+      if (/file_not_found/i.test(et)) throw new Error(msg);
       if (/balance|budget/i.test(et)) throw new ProviderError('stt', 'billing', msg);
-      throw new Error(msg);   // invalid_audio_file etc. are about this call only
+      if (/limit|quota/i.test(et)) throw new ProviderError('stt', 'quota', msg);
+      throw new ProviderError('stt', 'provider_down', msg);
     }
 
     // 4) transcript tokens -> speaker turns

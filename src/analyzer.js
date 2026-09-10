@@ -89,6 +89,22 @@ export function openTicket({ call, companyId, severity, title, description, sour
   const existing = q.one("SELECT id FROM tickets WHERE call_id=? AND status IN ('open','in_progress')", call.id);
   if (existing) return existing.id;
   const now = nowIso();
+  if (source === 'auto') {
+    // automatic re-checks (AI recovery, keyword fallback) must never duplicate a complaint the team already dealt with
+    const last = q.one('SELECT * FROM tickets WHERE call_id=? ORDER BY id DESC LIMIT 1', call.id);
+    if (last) {
+      const humanHandled = last.closed_by || q.one('SELECT 1 FROM ticket_events WHERE ticket_id=? AND user_id IS NOT NULL LIMIT 1', last.id);
+      if (humanHandled) {
+        db.prepare('INSERT INTO ticket_events(ticket_id,user_id,kind,text,created_at) VALUES(?,?,?,?,?)').run(last.id, null, 'comment', `🤖 إعادة فحص تلقائية: ${title}${description ? ' — ' + String(description).slice(0, 300) : ''}`, now);
+        return last.id;
+      }
+      // closed automatically earlier (nobody touched it) and it needs attention again: reopen the same ticket
+      db.prepare("UPDATE tickets SET status='open', severity=?, title=?, description=?, resolution=NULL, closed_at=NULL, resolved_at=NULL, updated_at=? WHERE id=?").run(severity, title, description, now, last.id);
+      db.prepare('INSERT INTO ticket_events(ticket_id,user_id,kind,text,created_at) VALUES(?,?,?,?,?)').run(last.id, null, 'status', 'أُعيد فتح التذكرة تلقائياً بعد تحليل جديد', now);
+      try { notifyTicket({ ticketId: last.id, kind: 'created', text: `أُعيد فتح التذكرة: ${title}`, actorId: null }); } catch (e) { log(`notify failed: ${e.message}`); }
+      return last.id;
+    }
+  }
   const settings = getSettings();
   const chain = chainFor(companyId);
   // a quality specialist opening the ticket manually has already done step 1 -> start at step 2
@@ -118,7 +134,7 @@ export function openTicket({ call, companyId, severity, title, description, sour
  *  provisional : save the keyword result only (no ticket decision) and hand the call to the AI lane (status awaiting_ai)
  *  fallbackNote/fallbackMark : keyword decision taken because the AI could not be used (fallbackMark = re-check with AI on recovery)
  */
-export async function analyzeCall(callId, { forceLLM = false, requireLLM = false, skipLLM = false, provisional = false, fallbackNote = null, fallbackMark = false } = {}) {
+export async function analyzeCall(callId, { forceLLM = false, requireLLM = false, skipLLM = false, provisional = false, fallbackNote = null, fallbackMark = false, fallbackProvider = null } = {}) {
   const call = q.one('SELECT * FROM calls WHERE id=?', callId);
   const tr = q.one('SELECT text, segments, speaker_map FROM transcripts WHERE call_id=?', callId);
   if (!call || !tr) throw new Error('call or transcript missing');
@@ -172,7 +188,7 @@ export async function analyzeCall(callId, { forceLLM = false, requireLLM = false
       needsTicket === null ? null : (needsTicket ? 1 : 0), llm?.ticket_reason || null, severity,
       llm?.summary || fallbackNote || (llmErr ? `(تعذر التحليل بالذكاء الاصطناعي: ${llmErr})` : null), llm?.customer_sentiment || null, llm?.quality_score ?? null,
       llm?.employee_mentioned || null, llm?.company_mentioned || null, JSON.stringify(llm?.issues || []), JSON.stringify(llm?.recommendations || []),
-      llm?.provider || (fallbackMark ? 'keywords_fallback' : 'keywords_only'), llm?.model || null, llm ? JSON.stringify(llm.raw) : null, llm?.took_ms || 0, nowIso());
+      llm?.provider || fallbackProvider || (fallbackMark ? 'keywords_fallback' : 'keywords_only'), llm?.model || null, llm ? JSON.stringify(llm.raw) : null, llm?.took_ms || 0, nowIso());
 
   // ---- ticket decision ----
   // With an LLM verdict (and llm_gate_tickets on) the LLM is the judge: banned words alone do not open a ticket.

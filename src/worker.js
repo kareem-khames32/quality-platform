@@ -5,10 +5,14 @@
  *                           -> awaiting_ai (banned words found and AI configured) | analyzed
  *   AI  lane : awaiting_ai -> AI verdict -> ticket decision -> analyzed
  *
- * Provider problems (no balance, bad key, storage quota, rate limit, outage) open that provider's circuit
- * (resilience.js): the lane pauses, calls keep their place in the queue and no retry is consumed; the lane
- * resumes by itself when the provider is back. Call-specific problems follow a per-call retry policy.
- * Audio is kept in memory only and dropped right after transcription.
+ * Provider problems (no balance, bad key, storage quota, rejected configuration, rate limit, outage) open that
+ * provider's circuit (resilience.js): the lane pauses, calls keep their place and no retry is consumed; the lane
+ * resumes by itself. Guards against the ways that can still go wrong:
+ *  - the same call-level error on 5 different calls in a row is treated as a configuration problem (lane pauses);
+ *  - a single "poison" call that keeps failing with provider-class errors is backed off so other calls can probe,
+ *    and is given up on when the provider works for everybody else;
+ *  - each error kind counts its own consecutive retries.
+ * Audio is kept in memory only and dropped right after upload.
  */
 import { config } from './config.js';
 import { db, q, bumpUsage, getSettings } from './db.js';
@@ -18,7 +22,7 @@ import { analyzeCall, findBannedWords } from './analyzer.js';
 import { llmReady } from './llm/index.js';
 import { assignRoles } from './roles.js';
 import { nowIso, sleep, stampIn } from './util.js';
-import { classifyCallError, circuitAllows, circuitState, recordSuccess, recordFailure, releaseProbe, onRecover, beat, LEGACY_PROVIDER_ERROR_SQL } from './resilience.js';
+import { ProviderError, classifyCallError, circuitAllows, circuitState, circuitView, circuitOpenForMs, lastSuccessMs, recordSuccess, recordFailure, releaseProbe, onRecover, beat, LEGACY_PROVIDER_ERROR_SQL } from './resilience.js';
 
 const log = (...a) => console.log(new Date().toISOString(), '[worker]', ...a);
 const active = { stt: new Set(), ai: new Set() };
@@ -35,8 +39,28 @@ function policy(kind, s) {
 
 const wantsAI = (hits, s) => llmReady() && (hits.length > 0 || !s.llm_only_flagged);
 
+/* ----------------------------- "same error everywhere" = configuration problem ----------------------------- */
+const streak = { stt: { sig: null, calls: new Set() }, ai: { sig: null, calls: new Set() } };
+const signature = (e) => String(e?.message || e).replace(/[0-9a-f]{8}-[0-9a-f-]{20,}/gi, '<id>').replace(/\d+/g, 'N').slice(0, 160);
+function configStreak(lane, callId, e) {
+  const s = streak[lane], sig = signature(e);
+  if (s.sig !== sig) { s.sig = sig; s.calls = new Set(); }
+  s.calls.add(callId);
+  if (s.calls.size < 5) return false;
+  s.sig = null; s.calls = new Set();
+  return true;
+}
+const clearStreak = (lane) => { streak[lane].sig = null; streak[lane].calls = new Set(); };
+
+/** Provider-class failure bookkeeping for one call: back it off after repeated failures, give up if only IT fails. */
+function providerFailureFor(call, p, dispatchedAt) {
+  const pf = (call.provider_failures || 0) + 1;
+  const onlyThisCall = pf >= 4 && lastSuccessMs(p) > dispatchedAt;   // the provider succeeded for others meanwhile
+  return { pf, onlyThisCall, retryAfter: pf >= 2 ? stampIn(Math.min(60, 2 ** pf) * MINUTE) : null };
+}
+
 /* ----------------------------- STT lane ----------------------------- */
-async function processSTT(callId, probe) {
+async function processSTT(callId, probe, dispatchedAt = Date.now()) {
   const call = q.one('SELECT * FROM calls WHERE id=?', callId);
   if (!call) return;
   try {
@@ -50,7 +74,8 @@ async function processSTT(callId, probe) {
       audio.ref = callId;
       const bytes = audio.buffer?.length || 0;   // the Soniox adapter releases the buffer right after upload
       const t = await transcribe(audio);
-      recordSuccess('stt');
+      recordSuccess('stt', dispatchedAt);
+      clearStreak('stt');
       const speakerMap = assignRoles(t.segments || [], call);
       db.prepare(`INSERT INTO transcripts(call_id,text,language,segments,speaker_map,provider,model,audio_bytes,took_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)
                   ON CONFLICT(call_id) DO UPDATE SET text=excluded.text, language=excluded.language, segments=excluded.segments, speaker_map=excluded.speaker_map, provider=excluded.provider,
@@ -66,21 +91,32 @@ async function processSTT(callId, probe) {
       await analyzeCall(callId, { skipLLM: true });
       bumpUsage('analyzed');
     }
-    q.run('UPDATE calls SET retries=0, retry_after=NULL WHERE id=?', callId);
+    q.run('UPDATE calls SET retries=0, retry_after=NULL, provider_failures=0, last_error_kind=NULL WHERE id=?', callId);
   } catch (e) {
-    onSTTError(call, e);
+    onSTTError(call, e, dispatchedAt);
   } finally {
     if (probe) releaseProbe('stt');
   }
 }
 
-function onSTTError(call, e) {
-  const cls = classifyCallError(e);
+function onSTTError(call, e, dispatchedAt) {
+  let cls = classifyCallError(e);
+  // the same unexplained error on 5 different calls in a row is not about the calls: pause the lane instead
+  if (cls.scope === 'call' && cls.kind === 'other' && configStreak('stt', call.id, e)) {
+    e = new ProviderError('stt', 'config', `نفس الخطأ على 5 مكالمات مختلفة ورا بعض: ${short(e.message).slice(0, 300)}`);
+    cls = { scope: 'provider', kind: 'config', provider: 'stt' };
+  }
   if (cls.scope === 'provider') {
-    // the provider is the problem, not this call: pause the lane, keep the call's place, consume no retry
-    recordFailure(cls.provider || 'stt', e);
-    q.run("UPDATE calls SET status='queued', error=? WHERE id=?", short(`⏸ مؤقت (${cls.kind}): ${e.message}`), call.id);
-    if (cls.kind === 'quota' && (cls.provider || 'stt') === 'stt') {
+    const p = cls.provider || 'stt';
+    recordFailure(p, e);   // the provider is the problem: pause the lane, keep the call's place, consume no retry
+    const pf = providerFailureFor(call, p, dispatchedAt);
+    if (pf.onlyThisCall) {
+      q.run("UPDATE calls SET status='failed', error=?, provider_failures=?, retry_after=NULL WHERE id=?", short(`✖ المزود بيرفض المكالمة دي تحديداً رغم إنه شغال مع باقي المكالمات: ${e.message}`), pf.pf, call.id);
+      log(`call ${call.id} FAILED: provider keeps failing on this call only (${cls.kind})`);
+      return;
+    }
+    q.run("UPDATE calls SET status='queued', error=?, provider_failures=?, retry_after=? WHERE id=?", short(`⏸ مؤقت (${cls.kind}): ${e.message}`), pf.pf, pf.retryAfter, call.id);
+    if (cls.kind === 'quota' && p === 'stt') {
       sonioxJanitor({ minAgeSec: 60 }).then((r) => log('janitor after quota error:', JSON.stringify(r))).catch((x) => log('janitor failed:', x.message));
     }
     return;
@@ -90,17 +126,17 @@ function onSTTError(call, e) {
     return;
   }
   const pol = policy(cls.kind, getSettings());
-  const retries = (call.retries || 0) + 1;
+  const retries = (call.last_error_kind === cls.kind ? (call.retries || 0) : 0) + 1;   // each kind counts its own consecutive failures
   if (retries >= pol.max) {
-    q.run("UPDATE calls SET status='failed', error=?, retries=?, retry_after=NULL WHERE id=?", short(`✖ ${e.message}`), retries, call.id);
+    q.run("UPDATE calls SET status='failed', error=?, retries=?, retry_after=NULL, last_error_kind=? WHERE id=?", short(`✖ ${e.message}`), retries, cls.kind, call.id);
     log(`call ${call.id} FAILED after ${retries} tries (${cls.kind}): ${e.message}`);
   } else {
-    q.run("UPDATE calls SET status='queued', error=?, retries=?, retry_after=? WHERE id=?", short(e.message), retries, stampIn(pol.delayMin * MINUTE), call.id);
+    q.run("UPDATE calls SET status='queued', error=?, retries=?, retry_after=?, last_error_kind=? WHERE id=?", short(e.message), retries, stampIn(pol.delayMin * MINUTE), cls.kind, call.id);
   }
 }
 
 /* ----------------------------- AI lane ----------------------------- */
-async function processAI(callId, probe) {
+async function processAI(callId, probe, dispatchedAt = Date.now()) {
   const call = q.one('SELECT * FROM calls WHERE id=?', callId);
   if (!call) return;
   try {
@@ -109,23 +145,41 @@ async function processAI(callId, probe) {
       await analyzeCall(callId, { skipLLM: true });   // AI switched off in settings: decide on keywords
     } else {
       const r = await analyzeCall(callId, { requireLLM: true });
-      recordSuccess('llm');
+      recordSuccess('llm', dispatchedAt);
+      clearStreak('ai');
       log(`call ${callId} AI: ${r.bannedHits.length} banned hits, complaint=${r.llm?.is_complaint ?? '-'}, violation=${r.llm?.agent_violation ?? '-'}, ticket=${r.ticketId ?? '-'}`);
     }
-    q.run('UPDATE calls SET ai_retries=0, ai_since=NULL, retry_after=NULL WHERE id=?', callId);
+    q.run('UPDATE calls SET ai_retries=0, ai_since=NULL, retry_after=NULL, provider_failures=0 WHERE id=?', callId);
     bumpUsage('analyzed');
   } catch (e) {
-    await onAIError(call, e);
+    await onAIError(call, e, dispatchedAt);
   } finally {
     if (probe) releaseProbe('llm');
   }
 }
 
-async function onAIError(call, e) {
-  const cls = classifyCallError(e);
+async function keywordDecision(callId, fallbackProvider, fallbackNote) {
+  try { await analyzeCall(callId, { skipLLM: true, fallbackProvider, fallbackNote }); return true; }
+  catch (x) { q.run("UPDATE calls SET status='failed', error=? WHERE id=?", short(`✖ ${x.message}`), callId); return false; }
+}
+
+async function onAIError(call, e, dispatchedAt) {
+  let cls = classifyCallError(e);
+  if (cls.scope === 'call' && cls.kind === 'other' && configStreak('ai', call.id, e)) {
+    e = new ProviderError('llm', 'config', `نفس الخطأ على 5 مكالمات مختلفة ورا بعض: ${short(e.message).slice(0, 300)}`);
+    cls = { scope: 'provider', kind: 'config', provider: 'llm' };
+  }
   if (cls.scope === 'provider') {
     recordFailure('llm', e);
-    q.run("UPDATE calls SET status='awaiting_ai', error=? WHERE id=?", short(`⏸ مؤقت (${cls.kind}): ${e.message}`), call.id);
+    const pf = providerFailureFor(call, 'llm', dispatchedAt);
+    if (pf.onlyThisCall) {
+      // Claude works for other calls but keeps failing on this one: decide on keywords, marked so an admin can re-send it
+      if (await keywordDecision(call.id, 'keywords_ai_failed', `تعذر تحليل الذكاء الاصطناعي لهذه المكالمة تحديداً (${short(e.message).slice(0, 150)})، فتم الحكم بالكلمات المحظورة.`)) {
+        q.run('UPDATE calls SET provider_failures=?, ai_since=NULL WHERE id=?', pf.pf, call.id);
+      }
+      return;
+    }
+    q.run("UPDATE calls SET status='awaiting_ai', error=?, provider_failures=?, retry_after=? WHERE id=?", short(`⏸ مؤقت (${cls.kind}): ${e.message}`), pf.pf, pf.retryAfter, call.id);
     return;
   }
   const n = (call.ai_retries || 0) + 1;
@@ -133,28 +187,36 @@ async function onAIError(call, e) {
     q.run("UPDATE calls SET status='awaiting_ai', ai_retries=?, retry_after=?, error=? WHERE id=?", n, stampIn(3 * MINUTE), short(e.message), call.id);
     return;
   }
-  try {
-    await analyzeCall(call.id, { skipLLM: true, fallbackNote: `تعذر تحليل الذكاء الاصطناعي لهذه المكالمة بعد ${n} محاولات (${short(e.message).slice(0, 150)})، فتم الحكم بالكلمات المحظورة.` });
+  // unparseable/refused output -> keywords_ai_failed (admin can re-send); anything unexplained -> re-checked on AI recovery
+  const provider = cls.kind === 'llm_output' ? 'keywords_ai_failed' : 'keywords_fallback';
+  if (await keywordDecision(call.id, provider, `تعذر تحليل الذكاء الاصطناعي لهذه المكالمة بعد ${n} محاولات (${short(e.message).slice(0, 150)})، فتم الحكم بالكلمات المحظورة.`)) {
     q.run('UPDATE calls SET ai_retries=?, ai_since=NULL WHERE id=?', n, call.id);
-  } catch (x) {
-    q.run("UPDATE calls SET status='failed', error=? WHERE id=?", short(`✖ ${x.message}`), call.id);
   }
 }
 
-/** AI down for longer than ai_fallback_hours: decide those calls on keywords now, re-check them with AI when it returns. */
+/** AI paused for longer than ai_fallback_hours: decide waiting calls on keywords now, re-check them with AI when it returns. */
 let lastChore = 0;
 async function aiChores() {
   if (Date.now() - lastChore < MINUTE) return;
   lastChore = Date.now();
   const hours = Number(getSettings().ai_fallback_hours ?? 24);
   if (!hours || !llmReady() || circuitState('llm') === 'closed') return;
+  if (circuitOpenForMs('llm') < hours * 60 * MINUTE) return;   // the OUTAGE must be that long, not just one call's wait
   const ids = q.all("SELECT id FROM calls WHERE status='awaiting_ai' AND ai_since IS NOT NULL AND ai_since <= ? ORDER BY calldate LIMIT 100", stampIn(-hours * 60 * MINUTE));
   for (const { id } of ids) {
-    try {
-      await analyzeCall(id, { skipLLM: true, fallbackMark: true, fallbackNote: `⚠️ حُكم عليها بالكلمات المحظورة فقط لأن الذكاء الاصطناعي متوقف أكثر من ${hours} ساعة؛ هتتراجع بالـ AI تلقائياً أول ما يرجع.` });
-    } catch (e) { log(`fallback analysis failed for ${id}: ${e.message}`); }
+    await keywordDecision(id, 'keywords_fallback', `⚠️ حُكم عليها بالكلمات المحظورة فقط لأن الذكاء الاصطناعي متوقف أكثر من ${hours} ساعة؛ هتتراجع بالـ AI تلقائياً أول ما يرجع.`);
   }
   if (ids.length) log(`AI down > ${hours}h: ${ids.length} calls decided on keywords (will be re-checked by AI on recovery)`);
+}
+
+/** AI paused and nothing is waiting for it: send one keyword-decided call back so the next probe can detect recovery. */
+function promoteProbeCandidate() {
+  const v = circuitView('llm');
+  if (v.state === 'closed' || v.retry_in_sec > 0) return false;
+  // one candidate is enough: something is already waiting (or running) for the probe
+  if (q.one("SELECT 1 FROM calls WHERE status='analyzing' OR (status='awaiting_ai' AND (retry_after IS NULL OR retry_after <= ?)) LIMIT 1", nowIso())) return false;
+  const r = q.one(`SELECT c.id FROM calls c JOIN analyses a ON a.call_id=c.id WHERE c.status='analyzed' AND a.provider='keywords_fallback' ORDER BY c.calldate DESC LIMIT 1`);
+  return r ? queueForAI(r.id) > 0 : false;
 }
 
 /* ----------------------------- picking work ----------------------------- */
@@ -203,16 +265,17 @@ async function runLane(name) {
       beat(name);
       if (L.ready()) {
         const free = L.max() - active[name].size;
+        const circuit = L.usesCircuit();
         if (free > 0) {
-          const circuit = L.usesCircuit();
           for (const id of L.pick(free, [...active[name]])) {
             if (circuit && !circuitAllows(L.provider)) break;      // provider paused: calls wait in the queue
             const probe = circuit && circuitState(L.provider) === 'half_open';
             active[name].add(id); dispatched++;
-            L.run(id, probe).catch((e) => log(`${name} run error:`, e)).finally(() => { active[name].delete(id); kick(name); });
+            L.run(id, probe, Date.now()).catch((e) => log(`${name} run error:`, e)).finally(() => { active[name].delete(id); kick(name); });
             if (probe) break;                                     // one probe at a time while the provider is being re-checked
           }
         }
+        if (name === 'ai' && !dispatched && circuit && promoteProbeCandidate()) continue;
       }
       if (name === 'ai') await aiChores();
     } catch (e) { log(`${name} lane error:`, e); }
@@ -232,18 +295,27 @@ export function recoverOnStartup() {
   // calls that the old code marked failed because of provider problems (Soniox quota/balance, network...) -> back to the queue
   const providerFailed = q.run(`UPDATE calls SET status='queued', retries=0, retry_after=NULL, error='↻ أُعيدت للطابور: ' || substr(COALESCE(error,''),1,200)
       WHERE status='failed' AND COALESCE(error,'') NOT LIKE '✖%' AND COALESCE(error,'') NOT LIKE '↻%' AND ${LEGACY_PROVIDER_ERROR_SQL}`).changes;
+  // queued calls whose retries were charged by provider errors under the old code: give them their retries back
+  const legacyRetries = q.run(`UPDATE calls SET retries=0, retry_after=NULL WHERE status='queued' AND retries>0 AND COALESCE(error,'') NOT LIKE '✖%' AND ${LEGACY_PROVIDER_ERROR_SQL}`).changes;
   const emptyAudio = q.run(`UPDATE calls SET status='skipped', skip_reason='empty_audio' WHERE status='failed' AND (error LIKE '%invalid_audio_file%' OR error LIKE '%No audio found%')`).changes;
   const aiMissing = llmReady() ? requeueFlaggedWithoutAI() : 0;
-  if (inFlightNoText + inFlightText + providerFailed + emptyAudio + aiMissing) {
-    log(`recovery: ${inFlightNoText + inFlightText} in-flight restored, ${providerFailed} provider-failed re-queued, ${emptyAudio} empty-audio marked skipped, ${aiMissing} flagged calls sent to AI`);
+  if (inFlightNoText + inFlightText + providerFailed + legacyRetries + emptyAudio + aiMissing) {
+    log(`recovery: ${inFlightNoText + inFlightText} in-flight restored, ${providerFailed} provider-failed re-queued, ${emptyAudio} empty-audio marked skipped, ${aiMissing} flagged calls sent to AI, ${legacyRetries} retry counters reset`);
   }
   return { in_flight: inFlightNoText + inFlightText, provider_failed: providerFailed, empty_audio: emptyAudio, ai_missing: aiMissing };
 }
 
-/** Flagged calls that never got an AI verdict (AI was down / failed / decided on keywords) -> AI lane. */
-export function requeueFlaggedWithoutAI() {
-  const n = q.run(`UPDATE calls SET status='awaiting_ai', ai_retries=0, retry_after=NULL, ai_since=COALESCE(ai_since, ?) WHERE status='analyzed' AND id IN (
-      SELECT a.call_id FROM analyses a WHERE a.banned_hits <> '[]' AND (a.provider IN ('keywords_fallback','pending_ai') OR (a.provider='keywords_only' AND a.summary LIKE '(تعذر التحليل%')))`, nowIso()).changes;
+/**
+ * Flagged calls without an AI verdict -> AI lane.
+ * automatic (default): calls decided on keywords because the AI was down (+ legacy failures);
+ * all=true (admin button): every flagged call whose analysis did not come from an AI provider.
+ */
+export function requeueFlaggedWithoutAI({ all = false } = {}) {
+  const which = all
+    ? "a.provider NOT IN ('anthropic','custom_http')"
+    : "(a.provider IN ('keywords_fallback','pending_ai') OR (a.provider='keywords_only' AND a.summary LIKE '(تعذر التحليل%'))";
+  const n = q.run(`UPDATE calls SET status='awaiting_ai', ai_retries=0, retry_after=NULL, provider_failures=0, ai_since=? WHERE status='analyzed' AND id IN (
+      SELECT a.call_id FROM analyses a WHERE a.banned_hits <> '[]' AND ${which})`, nowIso()).changes;
   if (n) kick('ai');
   return n;
 }
@@ -262,36 +334,41 @@ export function runWorkerLoop() {
 
 /** Process one call end-to-end right now (CLI / debugging): speech-to-text, then the AI lane step if it needs one. */
 export async function processCall(callId) {
-  await processSTT(callId, false);
-  if (q.one('SELECT status FROM calls WHERE id=?', callId)?.status === 'awaiting_ai') await processAI(callId, false);
+  await processSTT(callId, false, Date.now());
+  if (q.one('SELECT status FROM calls WHERE id=?', callId)?.status === 'awaiting_ai') await processAI(callId, false, Date.now());
 }
 
 /* ----------------------------- actions used by the UI ----------------------------- */
 /** Queue a call for transcription now (manual button). retranscribe=true drops the old transcript first. */
 export function queueCall(callId, userId = null, { retranscribe = false } = {}) {
   if (retranscribe) q.run('DELETE FROM transcripts WHERE call_id=? AND NOT EXISTS (SELECT 1 FROM calls WHERE id=? AND status IN (\'transcribing\',\'analyzing\'))', callId, callId);
-  q.run("UPDATE calls SET status='queued', error=NULL, retries=0, retry_after=NULL, queued_by=?, queued_at=? WHERE id=? AND status NOT IN ('transcribing','analyzing')", userId, nowIso(), callId);
+  q.run("UPDATE calls SET status='queued', error=NULL, retries=0, retry_after=NULL, provider_failures=0, last_error_kind=NULL, queued_by=?, queued_at=? WHERE id=? AND status NOT IN ('transcribing','analyzing')", userId, nowIso(), callId);
   kick('stt');
 }
 
-/** Send an already-transcribed call to the AI lane (manual re-analysis / bulk review). */
+/** Send an already-transcribed call to the AI lane (manual re-analysis / bulk review). Returns 1 if queued. */
 export function queueForAI(callId, userId = null) {
-  const n = q.run(`UPDATE calls SET status='awaiting_ai', error=NULL, ai_retries=0, retry_after=NULL, queued_by=COALESCE(?, queued_by), ai_since=COALESCE(ai_since, ?)
-      WHERE id=? AND status NOT IN ('transcribing','analyzing') AND EXISTS (SELECT 1 FROM transcripts t WHERE t.call_id=calls.id)`, userId, nowIso(), callId).changes;
+  const n = q.run(`UPDATE calls SET status='awaiting_ai', error=NULL, ai_retries=0, retry_after=NULL, provider_failures=0, queued_by=COALESCE(?, queued_by), ai_since=?
+      WHERE id=? AND status NOT IN ('transcribing','analyzing','awaiting_ai') AND EXISTS (SELECT 1 FROM transcripts t WHERE t.call_id=calls.id)`, userId, nowIso(), callId).changes;
   kick('ai');
   return n;
 }
 
+/* failure reasons - one precedence shared by the admin page (CASE) and the retry buttons (filters) */
+const NF = "error LIKE '%recording not found%'";
+const NET = "(error LIKE '%branch unreachable%' OR error LIKE '%EHOST%' OR error LIKE '%ECONN%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%timeout%' OR error LIKE '%login failed%' OR error LIKE '%fetch failed%')";
+export const FAILED_REASON_SQL = `CASE WHEN ${NET} THEN 'network' WHEN ${NF} THEN 'not_found' WHEN ${LEGACY_PROVIDER_ERROR_SQL} THEN 'provider' ELSE 'other' END`;
 const FAILED_FILTERS = {
   all: '1=1',
-  not_found: "error LIKE '%recording not found%'",
-  network: "(error LIKE '%EHOST%' OR error LIKE '%ECONN%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%timeout%' OR error LIKE '%login failed%' OR error LIKE '%fetch failed%')",
-  provider: LEGACY_PROVIDER_ERROR_SQL,
+  network: NET,
+  not_found: `(NOT ${NET} AND ${NF})`,
+  provider: `(NOT ${NET} AND NOT ${NF} AND ${LEGACY_PROVIDER_ERROR_SQL})`,
+  other: `(error IS NULL OR (NOT ${NET} AND NOT ${NF} AND NOT ${LEGACY_PROVIDER_ERROR_SQL}))`,
 };
 /** Admin: send failed calls back to the queue (all, or by reason). */
 export function retryFailed(which = 'all') {
   const cond = FAILED_FILTERS[which] || FAILED_FILTERS.all;
-  const n = q.run(`UPDATE calls SET status='queued', retries=0, retry_after=NULL, error='↻ ' || substr(COALESCE(error,''),1,200) WHERE status='failed' AND ${cond}`).changes;
+  const n = q.run(`UPDATE calls SET status='queued', retries=0, retry_after=NULL, provider_failures=0, last_error_kind=NULL, error='↻ ' || substr(COALESCE(error,''),1,200) WHERE status='failed' AND ${cond}`).changes;
   kick('stt');
   return n;
 }

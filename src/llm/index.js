@@ -158,12 +158,17 @@ function toProviderError(e) {
   if (!e || e.name === 'ProviderError') return e;
   const status = Number(e.status) || 0;
   const msg = String(e.message || e).slice(0, 400);
-  const probe = `${e.name || ''} ${msg}`;
-  if (status === 402 || /credit balance|billing|insufficient[_ ](credit|fund|balance)|exceeded your current quota/i.test(msg)) return new ProviderError('llm', 'billing', msg);
-  if (status === 401 || status === 403 || /invalid x-api-key|authentication_error|permission_error/i.test(msg)) return new ProviderError('llm', 'auth', msg);
-  if (status === 404 && /model/i.test(msg)) return new ProviderError('llm', 'auth', msg);   // wrong model name = configuration problem
+  // the SDK keeps the API's own message in e.error.error.message; include causes (DNS / refused / TLS) for connection errors
+  const all = `${e?.error?.error?.message || ''} ${msg}`;
+  const cause = `${e?.cause?.code || ''} ${e?.cause?.message || ''} ${e?.cause?.cause?.code || ''}`;
+  if (status === 402 || /credit balance|billing|insufficient[_ ](credit|fund|balance)|exceeded your current quota|usage limits?|spend(ing)? limit|regain access/i.test(all)) return new ProviderError('llm', 'billing', msg);
+  if (status === 401 || status === 403 || /invalid x-api-key|authentication_error|permission_error/i.test(all)) return new ProviderError('llm', 'auth', msg);
+  if (status === 404 && /model/i.test(all)) return new ProviderError('llm', 'config', msg);   // wrong model name
+  if (status === 400 && /model|output_config|effort|thinking|not supported|unsupported|extra inputs|unknown (field|parameter)|max_tokens/i.test(all)) return new ProviderError('llm', 'config', msg);
   if (status === 429) return new ProviderError('llm', 'rate_limit', msg);
-  if (status === 529 || (status >= 500 && status < 600) || /overloaded/i.test(msg)) return new ProviderError('llm', 'provider_down', msg);
-  if (/APIConnection|fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timed out|Request timed out/i.test(probe)) return new ProviderError('llm', 'network', msg);
+  if (status === 529 || (status >= 500 && status < 600) || /overloaded/i.test(all)) return new ProviderError('llm', 'provider_down', msg);
+  // AnthropicError does not set .name, so detect connection failures by class and by text ("Connection error.")
+  const isConnection = (Anthropic.APIConnectionError && e instanceof Anthropic.APIConnectionError) || /APIConnection/.test(e?.constructor?.name || '');
+  if (isConnection || /Connection error|fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|CERT_|socket hang up|timed out/i.test(`${all} ${cause}`)) return new ProviderError('llm', 'network', msg);
   return e;
 }
