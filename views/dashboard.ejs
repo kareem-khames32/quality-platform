@@ -1,5 +1,5 @@
 <%- include('partials/header', { title: 'اللوحة' }) %>
-<% const st = byStatus; const pending = (st.queued||0)+(st.transcribing||0)+(st.analyzing||0); %>
+<% const st = byStatus; const pending = (st.queued||0)+(st.awaiting_ai||0)+(st.transcribing||0)+(st.analyzing||0); %>
 <div class="grid grid-4" style="margin-bottom:1.25rem">
   <div class="stat"><div class="label">مكالمات مسجّلة في المنصة</div><div class="value"><%= Object.values(st).reduce((a,b)=>a+b,0).toLocaleString('en') %></div></div>
   <div class="stat"><div class="label">تم تحليلها</div><div class="value" style="color:var(--green)"><%= (st.analyzed||0).toLocaleString('en') %></div></div>

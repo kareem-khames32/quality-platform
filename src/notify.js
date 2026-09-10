@@ -121,3 +121,18 @@ export function notifyTicket({ ticketId, kind, text, actorId = null, onlyUserIds
 }
 
 export function unreadCount(userId) { return q.one('SELECT COUNT(*) c FROM notifications WHERE user_id=? AND read_at IS NULL', userId)?.c || 0; }
+
+/** System alerts (provider paused / recovered, collector errors, backups...) to admins and quality managers: in-app + e-mail. */
+export function notifyAdmins({ kind = 'system', text, subject }) {
+  const users = q.all("SELECT id, email FROM users WHERE active=1 AND role IN ('admin','quality_manager','supervisor')");
+  const ins = db.prepare('INSERT INTO notifications(user_id,ticket_id,kind,text,created_at) VALUES(?,?,?,?,?)');
+  for (const u of users) ins.run(u.id, null, kind, text, nowIso());
+  const emails = [...new Set(users.map((u) => u.email).filter((e) => e && e.includes('@')))];
+  if (emails.length && smtpReady()) {
+    const base = (config.server.public_url || '').replace(/\/$/, '');
+    const html = `<div dir="rtl" style="font-family:Tahoma,Arial;line-height:1.8;color:#1e293b"><p style="white-space:pre-wrap">${esc(text)}</p>${base ? `<p><a href="${base}/admin/system">افتح صفحة حالة النظام</a></p>` : ''}<p style="color:#94a3b8;font-size:.8rem">رسالة آلية من منصة جودة المكالمات</p></div>`;
+    sendMail({ to: emails, subject: `[جودة المكالمات] ${subject || String(text).slice(0, 80)}`, text, html })
+      .catch((e) => log(`system alert mail failed: ${e.message}`));
+  }
+  log(`system alert -> ${users.length} users: ${String(subject || text).slice(0, 120)}`);
+}

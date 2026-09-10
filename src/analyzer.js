@@ -110,12 +110,30 @@ export function openTicket({ call, companyId, severity, title, description, sour
   return id;
 }
 
-export async function analyzeCall(callId, { forceLLM = false } = {}) {
+/**
+ * Analyse one transcribed call.
+ *  forceLLM    : use the AI even without banned words (manual re-analysis)
+ *  requireLLM  : the AI verdict is mandatory - AI errors are re-thrown (the AI lane pauses/retries) instead of silently falling back
+ *  skipLLM     : keywords only
+ *  provisional : save the keyword result only (no ticket decision) and hand the call to the AI lane (status awaiting_ai)
+ *  fallbackNote/fallbackMark : keyword decision taken because the AI could not be used (fallbackMark = re-check with AI on recovery)
+ */
+export async function analyzeCall(callId, { forceLLM = false, requireLLM = false, skipLLM = false, provisional = false, fallbackNote = null, fallbackMark = false } = {}) {
   const call = q.one('SELECT * FROM calls WHERE id=?', callId);
   const tr = q.one('SELECT text, segments, speaker_map FROM transcripts WHERE call_id=?', callId);
   if (!call || !tr) throw new Error('call or transcript missing');
   const settings = getSettings();
   const bannedHits = findBannedWords(tr.text);
+
+  if (provisional) {
+    const now = nowIso();
+    db.prepare(`INSERT INTO analyses(call_id, banned_hits, is_complaint, complaint_type, agent_violation, violation_type, needs_ticket, ticket_reason, severity, summary, provider, created_at)
+                VALUES(?,?,0,'none',0,'none',NULL,NULL,?,NULL,'pending_ai',?)
+                ON CONFLICT(call_id) DO UPDATE SET banned_hits=excluded.banned_hits, severity=excluded.severity, provider='pending_ai', created_at=excluded.created_at`)
+      .run(callId, JSON.stringify(bannedHits), bannedHits[0]?.severity || 'low', now);
+    db.prepare("UPDATE calls SET status='awaiting_ai', error=NULL, ai_since=COALESCE(ai_since, ?) WHERE id=?").run(now, callId);
+    return { bannedHits, llm: null, ticketId: null, provisional: true };
+  }
 
   // role-labelled text (المحصل / العميل) gives the LLM a much clearer picture than raw speaker ids
   let llmText = tr.text;
@@ -126,10 +144,14 @@ export async function analyzeCall(callId, { forceLLM = false } = {}) {
 
   let llm = null, llmErr = null;
   // cost control: by default the LLM only looks at calls that tripped the banned-word list (or an explicit re-analysis)
-  const wantLLM = llmReady() && (forceLLM || !settings.llm_only_flagged || bannedHits.length > 0);
+  if (requireLLM && !llmReady()) throw new Error('LLM provider is not configured');
+  const wantLLM = !skipLLM && llmReady() && (forceLLM || requireLLM || !settings.llm_only_flagged || bannedHits.length > 0);
   if (wantLLM) {
     try { llm = await analyzeWithLLM({ call, transcript: llmText, bannedHits }); }
-    catch (e) { llmErr = e.message; log(`LLM failed for call ${callId}: ${e.message}`); }
+    catch (e) {
+      if (requireLLM) throw e;   // the AI lane decides: pause the provider or retry this call later
+      llmErr = e.message; log(`LLM failed for call ${callId}: ${e.message}`);
+    }
   }
 
   const topSev = bannedHits[0]?.severity || null;
@@ -148,9 +170,9 @@ export async function analyzeCall(callId, { forceLLM = false } = {}) {
               recommendations=excluded.recommendations, provider=excluded.provider, model=excluded.model, raw=excluded.raw, took_ms=excluded.took_ms, created_at=excluded.created_at`)
     .run(callId, JSON.stringify(bannedHits), isComplaint ? 1 : 0, llm?.complaint_type || (isComplaint ? 'other' : 'none'), agentViolation ? 1 : 0, llm?.violation_type || 'none',
       needsTicket === null ? null : (needsTicket ? 1 : 0), llm?.ticket_reason || null, severity,
-      llm?.summary || (llmErr ? `(تعذر التحليل بالذكاء الاصطناعي: ${llmErr})` : null), llm?.customer_sentiment || null, llm?.quality_score ?? null,
+      llm?.summary || fallbackNote || (llmErr ? `(تعذر التحليل بالذكاء الاصطناعي: ${llmErr})` : null), llm?.customer_sentiment || null, llm?.quality_score ?? null,
       llm?.employee_mentioned || null, llm?.company_mentioned || null, JSON.stringify(llm?.issues || []), JSON.stringify(llm?.recommendations || []),
-      llm?.provider || 'keywords_only', llm?.model || null, llm ? JSON.stringify(llm.raw) : null, llm?.took_ms || 0, nowIso());
+      llm?.provider || (fallbackMark ? 'keywords_fallback' : 'keywords_only'), llm?.model || null, llm ? JSON.stringify(llm.raw) : null, llm?.took_ms || 0, nowIso());
 
   // ---- ticket decision ----
   // With an LLM verdict (and llm_gate_tickets on) the LLM is the judge: banned words alone do not open a ticket.

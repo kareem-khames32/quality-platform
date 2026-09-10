@@ -31,6 +31,9 @@ export function normalizePhone(dst) {
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
+/** Local "YYYY-MM-DD HH:MM:SS" stamp `ms` from now (negative = in the past) - same format as nowIso(). */
+export function stampIn(ms) { return toLocalStamp(new Date(Date.now() + ms)); }
+
 export function fmtDuration(sec) {
   sec = Number(sec) || 0;
   const m = Math.floor(sec / 60), s = sec % 60;

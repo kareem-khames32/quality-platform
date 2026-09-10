@@ -9,7 +9,9 @@ import { config, saveConfigPatch, ROOT } from './config.js';
 import { db, q, getSettings, setSetting, seedDefaults, DEFAULT_SETTINGS } from './db.js';
 import { ensureAdmin, sessionMiddleware, requireLogin, requireRole, requireCap, createSession, destroySession, hashPassword, verifyPassword, checkLock, noteFailure, clearFailures, ticketScopeSql, canActOnTicket, ROLES, roleInfo, normalizeRole } from './auth.js';
 import { runCollectorLoop, collectAll, probeWarehouses, evaluateRules } from './collector.js';
-import { runWorkerLoop, queueCall, queueStats } from './worker.js';
+import { runWorkerLoop, queueCall, queueStats, queueForAI, retryFailed, laneInfo, requeueFlaggedWithoutAI, kick } from './worker.js';
+import { health, circuitView, forceProbe, LEGACY_PROVIDER_ERROR_SQL } from './resilience.js';
+import { startMaintenance, maintenanceInfo, backupNow } from './maintenance.js';
 import { streamRecording, resolveRecording, probeGateway, recordingSource } from './gateway.js';
 import { loadBranches } from './branches.js';
 import { assignRoles, swapRoles, roleLabel, formatTranscript } from './roles.js';
@@ -25,9 +27,33 @@ function canAccessCall(user, call) {
 }
 const staffOnly = requireCap('calls');   // quality team (specialists, quality manager, admin)
 import { analyzeCall, openTicket, findBannedWords, chainFor, dueAt } from './analyzer.js';
-import { sttReady } from './stt/index.js';
+import { sttReady, sonioxJanitor, sonioxInventory } from './stt/index.js';
 import { llmReady } from './llm/index.js';
-import { nowIso, fmtDuration } from './util.js';
+import { nowIso, fmtDuration, stampIn } from './util.js';
+
+/* ------------------------------ process safety ------------------------------ */
+// A dropped network socket (a user closing the player, a branch resetting a stream) must never take the service down.
+const BENIGN = /ECONNRESET|EPIPE|ECONNABORTED|ERR_STREAM_PREMATURE_CLOSE|ERR_STREAM_DESTROYED|socket hang up|aborted/i;
+process.on('unhandledRejection', (e) => console.error(new Date().toISOString(), '[process] unhandled rejection:', e));
+process.on('uncaughtException', (e) => {
+  if (BENIGN.test(`${e?.code || ''} ${e?.message || ''}`)) { console.error(new Date().toISOString(), '[process] ignored network error:', e?.code || e?.message); return; }
+  // unknown state: exit so NSSM restarts a clean process (in-flight calls are recovered at startup)
+  console.error(new Date().toISOString(), '[process] uncaught exception - restarting:', e);
+  setTimeout(() => process.exit(1), 300);
+});
+
+/** Banner lines shown to the quality team when something needs attention (provider paused, auto off...). */
+function systemAlerts(user) {
+  if (!user || !roleInfo(user.role).calls) return [];
+  const out = [];
+  for (const p of ['stt', 'llm']) {
+    const c = circuitView(p);
+    if (c.state !== 'closed') out.push({ level: 'warn', text: `⏸ ${c.label} متوقف مؤقتاً: ${c.reason}. المكالمات محفوظة في الانتظار وهتكمل تلقائياً${c.retry_in_sec ? ` — المحاولة التالية بعد ${Math.max(1, Math.ceil(c.retry_in_sec / 60))} دقيقة` : ' — جاري المحاولة الآن'}.` });
+  }
+  if (!sttReady()) out.push({ level: 'warn', text: '⚠️ مزود تحويل الصوت لنص غير مضبوط.' });
+  else if (!getSettings().auto_transcribe) out.push({ level: 'info', text: 'ℹ️ التحويل التلقائي متوقف من الإعدادات؛ المكالمات الجديدة مش بتتحول لنص إلا يدوياً.' });
+  return out;
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -52,13 +78,18 @@ app.use((req, res, next) => {
   res.locals.providers.smtp = smtpReady();
   res.locals.isStaff = !!req.user && !!roleInfo(req.user.role).calls;
   res.locals.ROLES = ROLES;
+  res.locals.systemAlerts = req.user ? systemAlerts(req.user) : [];
   next();
 });
 
 const back = (req, res, msg, err) => res.redirect((req.get('referer') || '/') .split('?')[0] + (msg ? `?msg=${encodeURIComponent(msg)}` : err ? `?err=${encodeURIComponent(err)}` : ''));
-const STATUS_AR = { new: 'جديدة', skipped: 'مستبعدة', queued: 'في الانتظار', transcribing: 'جاري التحويل', transcribed: 'تم التحويل', analyzing: 'جاري التحليل', analyzed: 'تم التحليل', failed: 'فشلت' };
+const STATUS_AR = { new: 'جديدة', skipped: 'مستبعدة', queued: 'في الانتظار', transcribing: 'جاري التحويل', transcribed: 'تم التحويل', awaiting_ai: 'بانتظار الـ AI', analyzing: 'جاري التحليل', analyzed: 'تم التحليل', failed: 'فشلت' };
 const TICKET_AR = { open: 'مفتوحة', in_progress: 'قيد المعالجة', resolved: 'تم الحل', closed: 'مغلقة' };
 app.locals.STATUS_AR = STATUS_AR; app.locals.TICKET_AR = TICKET_AR;
+
+/* ------------------------------ health (no login: used by the watchdog) ------------------------------ */
+const healthNow = () => health({ collectorIntervalSec: config.collector.interval_sec || 300 });
+app.get('/healthz', (req, res) => { const h = healthNow(); res.status(h.ok ? 200 : 503).json(h); });
 
 /* ------------------------------ auth ------------------------------ */
 app.get('/login', (req, res) => req.user ? res.redirect('/') : res.render('login', { error: null, next: req.query.next || '/' }));
@@ -91,7 +122,7 @@ app.use(requireLogin);
 app.get('/', (req, res) => {
   if (!res.locals.isStaff) return res.redirect('/tickets');
   const scope = ticketScopeSql(req.user);
-  const days = q.all(`SELECT substr(calldate,1,10) d, COUNT(*) calls, SUM(status='analyzed') analyzed, SUM(status IN ('queued','transcribing','analyzing')) pending
+  const days = q.all(`SELECT substr(calldate,1,10) d, COUNT(*) calls, SUM(status='analyzed') analyzed, SUM(status IN ('queued','awaiting_ai','transcribing','analyzing')) pending
                       FROM calls WHERE calldate >= date('now','-14 days') GROUP BY d ORDER BY d`);
   const byStatus = Object.fromEntries(q.all('SELECT status, COUNT(*) c FROM calls GROUP BY status').map((r) => [r.status, r.c]));
   const byServer = q.all(`SELECT warehouse, server_name, COUNT(*) calls, SUM(status='analyzed') analyzed, MAX(calldate) last_call FROM calls GROUP BY warehouse, server_name ORDER BY warehouse, server_name`);
@@ -167,16 +198,25 @@ app.post('/calls/:id/swap-roles', staffOnly, (req, res) => {
   }
   res.redirect(`/calls/${req.params.id}?msg=${encodeURIComponent('تم تبديل الأدوار')}`);
 });
-app.post('/calls/:id/transcribe', staffOnly, (req, res) => { queueCall(Number(req.params.id), req.user.id); res.redirect(`/calls/${req.params.id}?msg=${encodeURIComponent('بدأ التحويل الآن، النص هيظهر هنا تلقائياً عند الانتهاء')}`); });
+app.post('/calls/:id/transcribe', staffOnly, (req, res) => {
+  const id = Number(req.params.id);
+  queueCall(id, req.user.id, { retranscribe: !!q.one('SELECT 1 FROM transcripts WHERE call_id=?', id) });
+  res.redirect(`/calls/${id}?msg=${encodeURIComponent('بدأ التحويل الآن، النص هيظهر هنا تلقائياً عند الانتهاء')}`);
+});
 /** Live status for the UI: queue counters + per-call status for the ids requested. */
 app.get('/api/queue.json', (req, res) => {
   const ids = String(req.query.ids || '').split(',').map(Number).filter(Boolean).slice(0, 200);
   const calls = ids.length ? q.all(`SELECT id, status, error FROM calls WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids) : [];
-  res.json({ stats: queueStats(), calls, labels: STATUS_AR, unread: unreadCount(req.user.id) });
+  res.json({ stats: queueStats(), calls, labels: STATUS_AR, unread: unreadCount(req.user.id), alerts: systemAlerts(req.user) });
 });
 app.post('/calls/:id/reanalyze', staffOnly, async (req, res) => {
-  try { await analyzeCall(Number(req.params.id), { forceLLM: true }); res.redirect(`/calls/${req.params.id}?msg=${encodeURIComponent('تمت إعادة التحليل')}`); }
-  catch (e) { res.redirect(`/calls/${req.params.id}?err=${encodeURIComponent(e.message)}`); }
+  const id = Number(req.params.id);
+  try {
+    // through the AI lane: protected by the circuit breaker, queued if the AI is temporarily down
+    if (llmReady() && queueForAI(id, req.user.id)) return res.redirect(`/calls/${id}?msg=${encodeURIComponent('أُرسلت للذكاء الاصطناعي، النتيجة هتظهر هنا تلقائياً')}`);
+    await analyzeCall(id, { skipLLM: true });
+    res.redirect(`/calls/${id}?msg=${encodeURIComponent('تمت إعادة التحليل بالكلمات المحظورة')}`);
+  } catch (e) { res.redirect(`/calls/${id}?err=${encodeURIComponent(e.message)}`); }
 });
 app.post('/calls/:id/ticket', staffOnly, (req, res) => {
   const call = q.one('SELECT * FROM calls WHERE id=?', req.params.id);
@@ -392,7 +432,7 @@ app.get('/notifications/:id/go', (req, res) => {
   const n = q.one('SELECT * FROM notifications WHERE id=? AND user_id=?', req.params.id, req.user.id);
   if (!n) return res.redirect('/notifications');
   db.prepare('UPDATE notifications SET read_at=COALESCE(read_at, ?) WHERE id=?').run(nowIso(), n.id);
-  res.redirect(n.ticket_id ? `/tickets/${n.ticket_id}` : '/notifications');
+  res.redirect(n.ticket_id ? `/tickets/${n.ticket_id}` : (n.kind === 'system' && req.user.role === 'admin' ? '/admin/system' : '/notifications'));
 });
 
 /* ------------------------------ admin ------------------------------ */
@@ -473,15 +513,16 @@ admin.post('/apply-rules', (req, res) => {
     if (!r.queue) { if (r.reason === 'daily_cap') break; continue; }
     upd.run(nowIso(), c.id); bump.run(nowIso().slice(0, 10), 'auto_queued'); n++;
   }
-  queueCall(-1); // no-op update, just wakes the worker
+  kick('stt');
   res.redirect('/admin/settings?msg=' + encodeURIComponent(`تمت إضافة ${n} مكالمة من اليوم لقائمة التحويل`));
 });
 /** Re-run the analysis (with the LLM) on today's calls that tripped banned words - fixes tickets opened before the LLM was configured. */
 admin.post('/reanalyze-flagged', async (req, res) => {
   if (!llmReady()) return res.redirect('/admin/settings?err=' + encodeURIComponent('اضبط مزود الـ AI أولاً'));
-  const rows = q.all(`SELECT c.id FROM calls c JOIN analyses a ON a.call_id=c.id WHERE a.banned_hits <> '[]' AND date(c.calldate)=date('now','localtime') ORDER BY c.id DESC LIMIT 500`);
-  res.redirect('/admin/settings?msg=' + encodeURIComponent(`بدأت إعادة تحليل ${rows.length} مكالمة بالـ AI في الخلفية، تابع النتيجة في قائمة الشكاوى`));
-  (async () => { for (const r of rows) { try { await analyzeCall(r.id, { forceLLM: true }); } catch (e) { console.error('reanalyze', r.id, e.message); } } console.log(`[admin] reanalyzed ${rows.length} flagged calls`); })();
+  const rows = q.all(`SELECT c.id FROM calls c JOIN analyses a ON a.call_id=c.id WHERE a.banned_hits <> '[]' AND date(c.calldate)=date('now','localtime') ORDER BY c.id DESC LIMIT 2000`);
+  let n = 0;
+  for (const r of rows) n += queueForAI(r.id);   // the AI lane processes them with circuit-breaker protection
+  res.redirect('/admin/settings?msg=' + encodeURIComponent(`أُرسلت ${n} مكالمة للذكاء الاصطناعي، تابع النتيجة في قائمة الشكاوى`));
 });
 /** Re-judge every open auto ticket nobody has touched with the current AI criteria; clean ones get auto-closed. */
 admin.post('/review-open-tickets', async (req, res) => {
@@ -489,14 +530,75 @@ admin.post('/review-open-tickets', async (req, res) => {
   const rows = q.all(`SELECT t.call_id FROM tickets t WHERE t.source='auto' AND t.status IN ('open','in_progress')
                       AND NOT EXISTS (SELECT 1 FROM ticket_events e WHERE e.ticket_id=t.id AND e.user_id IS NOT NULL AND e.kind IN ('comment','escalate','status','assign','closed'))
                       AND EXISTS (SELECT 1 FROM transcripts tr WHERE tr.call_id=t.call_id) ORDER BY t.id DESC LIMIT 2000`);
-  res.redirect('/admin/settings?msg=' + encodeURIComponent(`بدأت مراجعة ${rows.length} تذكرة مفتوحة بالـ AI في الخلفية؛ اللي مالهاش لازمة هتتقفل تلقائياً`));
-  (async () => {
-    let closed = 0;
-    for (const r of rows) { try { const before = q.one("SELECT COUNT(*) c FROM tickets WHERE call_id=? AND status='closed'", r.call_id).c; await analyzeCall(r.call_id, { forceLLM: true }); if (q.one("SELECT COUNT(*) c FROM tickets WHERE call_id=? AND status='closed'", r.call_id).c > before) closed++; } catch (e) { console.error('review', r.call_id, e.message); } }
-    console.log(`[admin] reviewed ${rows.length} open tickets, auto-closed ${closed}`);
-  })();
+  let n = 0;
+  for (const r of rows) n += queueForAI(r.call_id);   // untouched tickets the AI now finds clean are auto-closed by the analyzer
+  res.redirect('/admin/settings?msg=' + encodeURIComponent(`أُرسلت ${n} تذكرة لمراجعة الذكاء الاصطناعي؛ اللي مالهاش لازمة هتتقفل تلقائياً`));
 });
 admin.post('/collect-now', async (req, res) => { const r = await collectAll(); res.redirect('/admin/settings?msg=' + encodeURIComponent('نتيجة السحب: ' + JSON.stringify(r))); });
+
+/* ------------------------------ system health page ------------------------------ */
+function systemData() {
+  const now = nowIso(), wait10 = stampIn(-10 * 60000), h1 = stampIn(-3600e3), h24 = stampIn(-24 * 3600e3);
+  const b = q.one(`SELECT
+      SUM(status='queued' AND (retry_after IS NULL OR retry_after <= ?) AND (queued_by IS NOT NULL OR calldate <= ?)) queued_ready,
+      SUM(status='queued' AND retry_after > ?) queued_retry,
+      SUM(status='queued' AND queued_by IS NULL AND calldate > ? AND (retry_after IS NULL OR retry_after <= ?)) queued_wait,
+      SUM(status='awaiting_ai') awaiting_ai, SUM(status='transcribing') transcribing, SUM(status='analyzing') analyzing,
+      SUM(status='failed') failed, SUM(status='skipped' AND skip_reason='empty_audio') empty_audio
+      FROM calls WHERE status IN ('queued','awaiting_ai','transcribing','analyzing','failed','skipped')`, now, wait10, now, wait10, now);
+  const failures = q.all(`SELECT CASE WHEN error LIKE '%recording not found%' THEN 'not_found'
+        WHEN (error LIKE '%EHOST%' OR error LIKE '%ECONN%' OR error LIKE '%ETIMEDOUT%' OR error LIKE '%timeout%' OR error LIKE '%login failed%' OR error LIKE '%fetch failed%') THEN 'network'
+        WHEN ${LEGACY_PROVIDER_ERROR_SQL} THEN 'provider' ELSE 'other' END reason, COUNT(*) n, MAX(substr(error,1,160)) sample
+      FROM calls WHERE status='failed' GROUP BY reason ORDER BY n DESC`);
+  const throughput = {
+    stt_1h: q.one('SELECT COUNT(*) c FROM transcripts WHERE created_at >= ?', h1).c,
+    stt_24h: q.one('SELECT COUNT(*) c FROM transcripts WHERE created_at >= ?', h24).c,
+    ai_1h: q.one("SELECT COUNT(*) c FROM analyses WHERE provider='anthropic' AND created_at >= ?", h1).c,
+    ai_24h: q.one("SELECT COUNT(*) c FROM analyses WHERE provider='anthropic' AND created_at >= ?", h24).c,
+  };
+  return { circuits: [circuitView('stt'), circuitView('llm')], health: healthNow(), lanes: laneInfo(), b, failures, throughput,
+    warehouses: q.all('SELECT * FROM sync_watermark ORDER BY warehouse'), s: getSettings(), maint: maintenanceInfo(),
+    providerNames: { stt: config.stt.provider, llm: `${config.llm.provider} ${config.llm.model || ''}` } };
+}
+admin.get('/system', async (req, res) => {
+  let soniox = null, sonioxError = null;
+  if (req.query.soniox) { try { soniox = await sonioxInventory(); } catch (e) { sonioxError = e.message; } }
+  res.render('admin/system', { ...systemData(), soniox, sonioxError });
+});
+admin.post('/system/resume/:p', (req, res) => {
+  const p = req.params.p === 'llm' ? 'llm' : 'stt';
+  forceProbe(p); kick(p === 'llm' ? 'ai' : 'stt');
+  res.redirect('/admin/system?msg=' + encodeURIComponent('جاري إعادة المحاولة الآن'));
+});
+admin.post('/system/janitor', async (req, res) => {
+  try {
+    const r = await sonioxJanitor({ minAgeSec: 120 });
+    res.redirect('/admin/system?soniox=1&msg=' + encodeURIComponent(r.skipped || `تم تنظيف Soniox: حُذف ${r.files_deleted} ملف و${r.transcriptions_deleted} تحويل${r.delete_errors ? ` (تعذر حذف ${r.delete_errors} وهيتعاد لاحقاً)` : ''}`));
+  } catch (e) { res.redirect('/admin/system?err=' + encodeURIComponent('فشل التنظيف: ' + e.message)); }
+});
+admin.post('/system/retry-failed', (req, res) => {
+  const n = retryFailed(String(req.body.which || 'all'));
+  res.redirect('/admin/system?msg=' + encodeURIComponent(`أُعيدت ${n} مكالمة فاشلة للطابور`));
+});
+admin.post('/system/rerun-ai', (req, res) => {
+  if (!llmReady()) return res.redirect('/admin/system?err=' + encodeURIComponent('مزود الذكاء الاصطناعي غير مضبوط'));
+  const n = requeueFlaggedWithoutAI();
+  res.redirect('/admin/system?msg=' + encodeURIComponent(`أُرسلت ${n} مكالمة معلّمة للذكاء الاصطناعي`));
+});
+admin.post('/system/settings', (req, res) => {
+  const b = req.body, int = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Number.isFinite(Number(v)) && v !== '' ? Math.round(Number(v)) : d));
+  setSetting('stt_concurrency', int(b.stt_concurrency, 1, 80, 20));
+  setSetting('ai_concurrency', int(b.ai_concurrency, 1, 30, 6));
+  setSetting('not_found_max_retries', int(b.not_found_max_retries, 1, 50, 8));
+  setSetting('ai_fallback_hours', int(b.ai_fallback_hours, 0, 720, 24));
+  setSetting('backlog_alert', int(b.backlog_alert, 0, 10000000, 30000));
+  kick();
+  res.redirect('/admin/system?msg=' + encodeURIComponent('تم حفظ إعدادات التشغيل'));
+});
+admin.post('/system/backup', (req, res) => {
+  try { const r = backupNow(); res.redirect('/admin/system?msg=' + encodeURIComponent(`تم أخذ نسخة احتياطية (${r.size_mb} MB)`)); }
+  catch (e) { res.redirect('/admin/system?err=' + encodeURIComponent('فشل النسخ الاحتياطي: ' + e.message)); }
+});
 
 admin.get('/companies', (req, res) => {
   const companies = q.all(`SELECT c.*, (SELECT COUNT(*) FROM tickets t WHERE t.company_id=c.id AND t.status IN ('open','in_progress')) open_tickets FROM companies c ORDER BY c.name`);
@@ -614,6 +716,7 @@ const startBackground = () => {
   console.log(`providers: gateway_key=${!!config.gateway.api_key} stt=${config.stt.provider}(${sttReady() ? 'ready' : 'not ready'}) llm=${config.llm.provider}(${llmReady() ? 'ready' : 'keywords only'})`);
   if (config.collector.enabled && process.env.NO_COLLECTOR !== '1') runCollectorLoop();
   if (config.worker.enabled && process.env.NO_WORKER !== '1') runWorkerLoop();
+  if (process.env.NO_MAINTENANCE !== '1') startMaintenance();
 };
 if (tls) {
   const httpsPort = config.server.https.port || 8443;
@@ -623,6 +726,12 @@ if (tls) {
   });
   // plain HTTP just redirects to HTTPS (same host, https port)
   http.createServer((req, res) => {
+    // the watchdog checks health over plain HTTP on this port
+    if (req.url === '/healthz' || req.url.startsWith('/healthz?')) {
+      const h = healthNow();
+      res.writeHead(h.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(h));
+    }
     const host = (req.headers.host || 'localhost').replace(/:\d+$/, '');
     res.writeHead(301, { Location: `https://${host}${httpsPort === 443 ? '' : ':' + httpsPort}${req.url}` });
     res.end();

@@ -6,6 +6,7 @@ import sql from 'mssql';
 import { config } from './config.js';
 import { db, getSettings, usageToday, q } from './db.js';
 import { parseClid, normalizePhone, toLocalStamp, nowIso, sleep } from './util.js';
+import { beat } from './resilience.js';
 
 const log = (...a) => console.log(new Date().toISOString(), '[collector]', ...a);
 
@@ -66,6 +67,7 @@ export async function collectWarehouse(w) {
   const batch = config.collector.batch_size || 5000;
   let total = 0, queued = 0;
   for (;;) {
+    beat('collector');   // a long first sync must not look like a stalled collector to the watchdog
     const where = settings.ingest_only_answered ? "AND disposition='ANSWERED' AND billsec > 0" : '';
     const r = await pool.request().input('last', sql.BigInt, lastId).input('n', sql.Int, batch).query(`
       SELECT TOP (@n) id, server_name, source_id, calldate, clid, src, dst, dcontext, duration, billsec, disposition, uniqueid
@@ -118,11 +120,13 @@ let running = false;
 export async function runCollectorLoop() {
   const interval = (config.collector.interval_sec || 300) * 1000;
   for (;;) {
+    beat('collector');
     if (!running) {
       running = true;
       try { await collectAll(); } catch (e) { log('loop error', e); }
       running = false;
     }
+    beat('collector');
     await sleep(interval);
   }
 }

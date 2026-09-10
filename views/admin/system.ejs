@@ -1,0 +1,124 @@
+<%- include('../partials/header', { title: 'حالة النظام' }) %>
+<% const n = (v) => (v == null ? '0' : Number(v).toLocaleString('en'));
+   const badge = (st) => st === 'closed' ? '<span class="badge green">شغال</span>' : st === 'half_open' ? '<span class="badge amber">بيجرب دلوقتي</span>' : '<span class="badge red">متوقف مؤقتاً</span>';
+   const hb = health.heartbeat_age_sec || {};
+   const age = (s) => s == null ? 'غير مفعّل' : s < 90 ? 'الآن' : s < 3600 ? `منذ ${Math.round(s / 60)} دقيقة` : `منذ ${Math.round(s / 3600)} ساعة`;
+   const REASON_AR = { not_found: 'التسجيل مش موجود على الفرع', network: 'تعذر الوصول لسيرفر الفرع', provider: 'مشكلة عند المزود (قديمة)', other: 'أخرى' }; %>
+
+<div class="card">
+  <div class="card-title" style="justify-content:space-between;flex-wrap:wrap">
+    <span>🩺 حالة النظام
+      <% if (health.ok) { %><span class="badge green">سليم</span><% } else { %><span class="badge red">محتاج انتباه: <%= health.problems.join('، ') %></span><% } %></span>
+    <span class="muted">شغال منذ <%= (health.uptime_sec / 3600).toFixed(1) %> ساعة · ذاكرة <%= health.memory_mb %> MB · Node <%= health.node %></span>
+  </div>
+  <div class="grid grid-2">
+    <% for (const c of circuits) { %>
+    <div class="stat">
+      <div class="label"><%= c.label %> <span class="muted">(<%= c.provider === 'stt' ? providerNames.stt : providerNames.llm %>)</span></div>
+      <div style="margin:.35rem 0"><%- badge(c.state) %> <% if (c.state !== 'closed') { %><b><%= c.reason %></b><% } %></div>
+      <% if (c.state !== 'closed') { %>
+        <div class="muted">متوقف منذ <span class="dt"><%= c.since %></span> · المحاولة التالية <%= c.retry_in_sec ? 'بعد ' + Math.max(1, Math.ceil(c.retry_in_sec / 60)) + ' دقيقة' : 'الآن' %></div>
+        <div class="muted" style="direction:ltr;text-align:left;font-size:.75rem;word-break:break-word"><%= c.message %></div>
+        <p class="muted" style="margin-top:.3rem">المكالمات محفوظة في الانتظار ومش بتفشل؛ النظام بيجرب تلقائياً ويكمل أول ما المزود يرجع.</p>
+        <form method="POST" action="/admin/system/resume/<%= c.provider %>" style="margin-top:.4rem"><button class="btn sm">⚡ جرّب الآن</button></form>
+      <% } else { %>
+        <div class="muted">آخر نجاح: <span class="dt"><%= c.last_ok_at || '—' %></span><% if (c.last_error_at) { %> · آخر خطأ: <span class="dt"><%= c.last_error_at %></span><% } %></div>
+      <% } %>
+    </div>
+    <% } %>
+  </div>
+</div>
+
+<div class="grid grid-4" style="margin-bottom:1.25rem">
+  <div class="stat"><div class="label">جاهزة للتحويل الآن</div><div class="value"><%= n(b.queued_ready) %></div><div class="muted">الأحدث بيتحول الأول</div></div>
+  <div class="stat"><div class="label">بتستنى (إعادة محاولة / 10 دقايق بعد المكالمة)</div><div class="value" style="color:var(--dim)"><%= n((b.queued_retry || 0) + (b.queued_wait || 0)) %></div></div>
+  <div class="stat"><div class="label">بانتظار الذكاء الاصطناعي</div><div class="value" style="color:var(--amber)"><%= n(b.awaiting_ai) %></div><div class="muted">مكالمات فيها كلمات محظورة</div></div>
+  <div class="stat"><div class="label">شغالين دلوقتي</div><div class="value"><%= n(lanes.stt.active) %> / <%= n(lanes.ai.active) %></div><div class="muted">تحويل (من <%= lanes.stt.max %>) / AI (من <%= lanes.ai.max %>)</div></div>
+  <div class="stat"><div class="label">اتحولت لنص</div><div class="value" style="color:var(--green)"><%= n(throughput.stt_1h) %></div><div class="muted">آخر ساعة · <%= n(throughput.stt_24h) %> آخر 24 ساعة</div></div>
+  <div class="stat"><div class="label">حللها الذكاء الاصطناعي</div><div class="value" style="color:var(--green)"><%= n(throughput.ai_1h) %></div><div class="muted">آخر ساعة · <%= n(throughput.ai_24h) %> آخر 24 ساعة</div></div>
+  <div class="stat"><div class="label">فشلت نهائياً</div><div class="value" style="color:<%= b.failed ? 'var(--red)' : 'var(--primary)' %>"><%= n(b.failed) %></div></div>
+  <div class="stat"><div class="label">صوت فاضي (مستبعدة)</div><div class="value" style="color:var(--dim)"><%= n(b.empty_audio) %></div><div class="muted">مفيش فيها كلام</div></div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">❌ أسباب الفشل</div>
+    <% if (!failures.length) { %><p class="muted">مفيش مكالمات فاشلة.</p><% } else { %>
+    <table>
+      <tr><th>السبب</th><th>العدد</th><th>مثال</th><th></th></tr>
+      <% for (const f of failures) { %>
+      <tr><td><b><%= REASON_AR[f.reason] || f.reason %></b></td><td><%= n(f.n) %></td><td class="muted" style="font-size:.75rem;direction:ltr;text-align:left;max-width:280px;word-break:break-word"><%= f.sample %></td>
+        <td><form method="POST" action="/admin/system/retry-failed" class="inline-form"><input type="hidden" name="which" value="<%= f.reason === 'other' ? 'all' : f.reason %>"><button class="btn secondary sm">↻ أعد المحاولة</button></form></td></tr>
+      <% } %>
+    </table>
+    <form method="POST" action="/admin/system/retry-failed" style="margin-top:.6rem" onsubmit="return confirm('إعادة كل المكالمات الفاشلة للطابور؟')"><input type="hidden" name="which" value="all"><button class="btn secondary sm">↻ أعد كل الفاشلة</button></form>
+    <% } %>
+    <div class="card-title" style="margin-top:1.25rem">🧠 الذكاء الاصطناعي</div>
+    <p class="muted">كل مكالمة فيها كلمة محظورة بتتحلل بالـ AI فوراً بعد تحويلها. لو الـ AI وقف، المكالمات بتستنى وتتحلل أول ما يرجع.</p>
+    <form method="POST" action="/admin/system/rerun-ai"><button class="btn secondary sm">🧠 ابعت للـ AI كل المكالمات المعلّمة اللي ما اتحللتش بيه</button></form>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔄 السحب من المستودعات</div>
+    <table>
+      <tr><th>المستودع</th><th>آخر سحب</th><th>آخر دفعة</th><th>الحالة</th></tr>
+      <% for (const w of warehouses) { %>
+      <tr><td><b><%= w.warehouse %></b></td><td><span class="dt"><%= w.last_sync_at %></span></td><td><%= n(w.last_count) %></td>
+        <td><% if (w.last_error) { %><span class="badge red" title="<%= w.last_error %>">خطأ</span> <span class="muted" style="font-size:.75rem"><%= String(w.last_error).slice(0, 80) %></span><% } else { %><span class="badge green">سليم</span><% } %></td></tr>
+      <% } %>
+    </table>
+    <div class="card-title" style="margin-top:1.25rem">💓 نبض الأجزاء</div>
+    <div class="kv">
+      <b>تحويل الصوت</b><span><%= age(hb.stt) %></span>
+      <b>الذكاء الاصطناعي</b><span><%= age(hb.ai) %></span>
+      <b>سحب المكالمات</b><span><%= age(hb.collector) %></span>
+      <b>قاعدة البيانات</b><span><%= health.db ? 'سليمة' : 'مشكلة' %></span>
+    </div>
+    <p class="muted" style="margin-top:.5rem">مراقب الخدمة (Watchdog) بيعيد تشغيل النظام تلقائياً لو أي جزء وقف أكثر من 10 دقائق، والخدمة بتقوم لوحدها بعد إعادة تشغيل السيرفر.</p>
+  </div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">🗄 التخزين عند Soniox</div>
+    <p class="muted">كل ملف بيترفع لـ Soniox بيتمسح فوراً بعد التحويل (نجح أو فشل)، ومنظّف تلقائي بيشتغل كل 15 دقيقة. حدود Soniox: 1,000 ملف و2,000 تحويل.</p>
+    <% if (soniox && !soniox.skipped) { %>
+      <div class="kv" style="margin:.5rem 0">
+        <b>الملفات</b><span><%= n(soniox.files) %> / <%= n(soniox.limits.files) %> <span class="muted">(منها بتاعتنا <%= n(soniox.files_ours) %> · <%= n(soniox.files_mb) %> MB)</span></span>
+        <b>التحويلات</b><span><%= n(soniox.transcriptions) %> / <%= n(soniox.limits.transcriptions) %> <span class="muted"><%= JSON.stringify(soniox.by_status) %></span></span>
+        <b>قيد الاستخدام الآن</b><span><%= n(soniox.in_use.files) %> ملف · <%= n(soniox.in_use.transcriptions) %> تحويل</span>
+        <b>في انتظار الحذف</b><span><%= n(soniox.leftovers_pending_delete) %></span>
+      </div>
+    <% } else if (soniox && soniox.skipped) { %><p class="muted"><%= soniox.skipped %></p>
+    <% } else if (sonioxError) { %><div class="alert error">تعذر الفحص: <%= sonioxError %></div><% } %>
+    <% const lj = soniox && soniox.last_janitor; if (lj) { %><p class="muted">آخر تنظيف: <span class="dt"><%= lj.at %></span> — حُذف <%= n(lj.files_deleted) %> ملف و<%= n(lj.transcriptions_deleted) %> تحويل</p><% } %>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <a class="btn secondary sm" href="/admin/system?soniox=1">🔎 افحص التخزين</a>
+      <form method="POST" action="/admin/system/janitor" class="inline-form" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='⏳ جاري التنظيف…'"><button class="btn sm">🧹 نظّف مخلفات Soniox الآن</button></form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">⚙️ إعدادات التشغيل</div>
+    <form method="POST" action="/admin/system/settings">
+      <div class="row">
+        <div><label>تحويلات متوازية</label><input type="number" name="stt_concurrency" min="1" max="80" value="<%= s.stt_concurrency %>"></div>
+        <div><label>تحليلات AI متوازية</label><input type="number" name="ai_concurrency" min="1" max="30" value="<%= s.ai_concurrency %>"></div>
+      </div>
+      <div class="row">
+        <div><label>محاولات لو التسجيل مش موجود (كل 15 دقيقة)</label><input type="number" name="not_found_max_retries" min="1" max="50" value="<%= s.not_found_max_retries %>"></div>
+        <div><label>لو الـ AI متوقف أكثر من (ساعة) احكم بالكلمات مؤقتاً · 0 = استنى</label><input type="number" name="ai_fallback_hours" min="0" max="720" value="<%= s.ai_fallback_hours %>"></div>
+      </div>
+      <div class="row">
+        <div><label>نبّهني لو الطابور زاد عن · 0 = بدون</label><input type="number" name="backlog_alert" min="0" value="<%= s.backlog_alert %>"></div>
+      </div>
+      <button class="btn">حفظ</button>
+    </form>
+    <div class="card-title" style="margin-top:1.25rem">💾 النسخ الاحتياطي</div>
+    <p class="muted">نسخة يومية تلقائية لقاعدة البيانات (آخر 7 أيام) في <code>data\backups</code>.</p>
+    <% if (maint.backup) { %><p>آخر نسخة: <span class="dt"><%= maint.backup.at %></span> · <%= maint.backup.size_mb %> MB</p><% } else { %><p class="muted">لسه مفيش نسخة (أول نسخة بعد 3 دقايق من التشغيل).</p><% } %>
+    <% if (maint.backup_error) { %><div class="alert error">آخر محاولة فشلت: <%= maint.backup_error %></div><% } %>
+    <form method="POST" action="/admin/system/backup"><button class="btn secondary sm">💾 خد نسخة دلوقتي</button></form>
+  </div>
+</div>
+<%- include('../partials/footer') %>

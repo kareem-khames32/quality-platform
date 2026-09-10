@@ -89,7 +89,7 @@ async function playRow(id, btn) {
   a.play().catch(() => {});
 }
 // Live status: rows that are queued/working get their badge refreshed from /api/queue.json (header widget polls it every 5s).
-const pendingIds = [<%= rows.filter(r => ['queued','transcribing','analyzing','transcribed'].includes(r.status)).map(r => r.id).join(',') %>];
+const pendingIds = [<%= rows.filter(r => ['queued','transcribing','analyzing','transcribed','awaiting_ai'].includes(r.status)).map(r => r.id).join(',') %>];
 if (pendingIds.length) {
   (async function pollRows(){
     try {

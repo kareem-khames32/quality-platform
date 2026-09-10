@@ -24,14 +24,20 @@
   <a class="nav-link <%= path.startsWith('/admin/companies') || path.startsWith('/admin/servers') || path.startsWith('/admin/extensions') ? 'active' : '' %>" href="/admin/companies">🏢 الشركات والتحويلات</a>
   <a class="nav-link <%= path.startsWith('/admin/users') ? 'active' : '' %>" href="/admin/users">👥 المستخدمون</a>
   <a class="nav-link <%= path.startsWith('/admin/settings') ? 'active' : '' %>" href="/admin/settings">⚙️ الإعدادات</a>
+  <a class="nav-link <%= path.startsWith('/admin/system') ? 'active' : '' %>" href="/admin/system">🩺 النظام</a>
   <% } %>
   <span class="spacer"></span>
   <a href="/calls?status=queued&from=" id="queueWidget" class="badge gray" title="طابور التحويل: في الانتظار / جاري / فشل">⏳ …</a>
   <script>
   (async function pollQueue(){
     try { const j = await (await fetch('/api/queue.json')).json(); const s = j.stats; const el = document.getElementById('queueWidget');
-      el.textContent = `⏳ ${s.queued} في الانتظار · ⚙️ ${s.working} جاري · ✅ ${s.done_today} اليوم` + (s.failed ? ` · ❌ ${s.failed}` : '');
+      el.textContent = `⏳ ${s.queued} في الانتظار` + (s.awaiting_ai ? ` · 🧠 ${s.awaiting_ai} للـ AI` : '') + ` · ⚙️ ${s.working} جاري · ✅ ${s.done_today} اليوم` + (s.failed ? ` · ❌ ${s.failed}` : '');
       el.className = 'badge ' + (s.working ? 'amber' : s.queued ? 'blue' : 'gray');
+      const box = document.getElementById('sysAlerts');
+      if (box && Array.isArray(j.alerts)) {
+        const esc = (t) => String(t).replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
+        box.innerHTML = j.alerts.map((a) => `<div class="sys-alert ${a.level}">${esc(a.text)}<%= user.role === 'admin' ? ' ' : '' %>${<%= user.role === 'admin' ? 'true' : 'false' %> ? ' <a href="/admin/system">حالة النظام ←</a>' : ''}</div>`).join('');
+      }
       if (window.onQueueUpdate) window.onQueueUpdate(j);
     } catch (e) {}
     setTimeout(pollQueue, 5000);
@@ -48,6 +54,7 @@
   <a class="nav-link" href="/change-password">🔑</a>
   <form method="POST" action="/logout" class="inline-form"><button class="btn secondary sm">خروج</button></form>
 </nav>
+<div id="sysAlerts"><% for (const a of (typeof systemAlerts !== 'undefined' ? systemAlerts : [])) { %><div class="sys-alert <%= a.level %>"><%= a.text %><% if (user.role === 'admin') { %> <a href="/admin/system">حالة النظام ←</a><% } %></div><% } %></div>
 <% } %>
 <div class="container">
 <% if (msg) { %><div class="alert success"><%= msg %></div><% } %>

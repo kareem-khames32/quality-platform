@@ -175,6 +175,9 @@ export async function streamRecording(call, req, res) {
   res.status(up.statusCode);
   for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition', 'cache-control']) if (up.headers[h]) res.setHeader(h, up.headers[h]);
   if (!up.headers['content-type']) res.setHeader('content-type', 'audio/wav');
+  // a branch resetting the stream or a listener closing the player must not crash the process
+  up.on('error', () => { try { res.destroy(); } catch {} });
+  res.on('close', () => { try { up.destroy(); } catch {} });
   up.pipe(res);
 }
 

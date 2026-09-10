@@ -137,6 +137,13 @@ addColumn('analyses', 'ticket_reason', 'TEXT');
 addColumn('tickets', 'step_role', 'TEXT');        // role that owns the current step (quality_specialist | quality_manager | customer_care | sector_manager)
 addColumn('tickets', 'resolution', 'TEXT');       // closing feedback + actions taken
 addColumn('companies', 'notify_emails', 'TEXT');   // comma-separated extra recipients
+addColumn('calls', 'ai_retries', 'INTEGER NOT NULL DEFAULT 0');   // AI lane attempts that failed for call-specific reasons
+addColumn('calls', 'ai_since', 'TEXT');                           // when the call started waiting for the AI lane
+db.exec(`
+CREATE INDEX IF NOT EXISTS ix_calls_status_date ON calls(status, calldate);
+CREATE INDEX IF NOT EXISTS ix_transcripts_created ON transcripts(created_at);
+CREATE TABLE IF NOT EXISTS soniox_leftovers (kind TEXT NOT NULL, id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (kind, id));
+`);
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS notifications (
@@ -155,6 +162,11 @@ export const DEFAULT_SETTINGS = {
   llm_gate_tickets: true,            // when the LLM has judged a call, open a ticket only if it confirms a complaint or an agent violation
   llm_custom_prompt: '',             // extra business rules written by the quality team, appended to the LLM system prompt
   chain_roles: ['quality_specialist', 'quality_manager', 'customer_care', 'sector_manager'],
+  stt_concurrency: 20,               // parallel speech-to-text jobs (Soniox allows up to 100 pending)
+  ai_concurrency: 6,                 // parallel AI analyses
+  not_found_max_retries: 8,          // recording not on the branch yet: retry every 15 minutes this many times
+  ai_fallback_hours: 24,             // AI down longer than this: decide on keywords now, re-check with AI when it returns (0 = wait forever)
+  backlog_alert: 30000,              // alert admins when the transcription queue grows beyond this (0 = off)
   role_labels: { agent: 'المحصل', customer: 'العميل' },
   sla_hours: { high: 4, medium: 24, low: 72 },   // response deadline per severity
   severity_labels: { high: 'تدخل فوري', medium: 'متوسطة', low: 'منخفضة' },

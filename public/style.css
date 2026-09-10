@@ -68,3 +68,10 @@ audio { width:100%; margin-top:.5rem; }
 .notif .kind { flex:0 0 auto; }
 .related-call { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; padding:.45rem 0; border-bottom:1px dashed var(--border); }
 .related-call.current { background:#fff7ed; border-radius:8px; padding:.45rem .5rem; }
+/* system alert banner (provider paused, auto-transcribe off...) */
+#sysAlerts { max-width:1400px; margin:0 auto; padding:0 1.5rem; }
+#sysAlerts:empty { display:none; }
+.sys-alert { margin-top:.75rem; padding:.6rem 1rem; border-radius:10px; font-weight:600; font-size:.9rem; line-height:1.7; }
+.sys-alert.warn { background:#fff7ed; color:#9a3412; border:1px solid #fed7aa; }
+.sys-alert.info { background:#eff6ff; color:#1e40af; border:1px solid #bfdbfe; }
+.sys-alert a { margin-inline-start:.5rem; font-weight:700; }

@@ -138,7 +138,7 @@ export function servers(f) {
 }
 
 /* ======================= detailed (row-level) reports ======================= */
-const STATUS_AR = { new: 'جديدة', skipped: 'مستبعدة', queued: 'في الانتظار', transcribing: 'جاري التحويل', transcribed: 'تم التحويل', analyzing: 'جاري التحليل', analyzed: 'تم التحليل', failed: 'فشلت' };
+const STATUS_AR = { new: 'جديدة', skipped: 'مستبعدة', queued: 'في الانتظار', transcribing: 'جاري التحويل', transcribed: 'تم التحويل', awaiting_ai: 'بانتظار الـ AI', analyzing: 'جاري التحليل', analyzed: 'تم التحليل', failed: 'فشلت' };
 const TICKET_AR = { open: 'مفتوحة', in_progress: 'قيد المعالجة', resolved: 'تم الحل', closed: 'مغلقة' };
 const SEV_AR = { high: 'عالية', medium: 'متوسطة', low: 'منخفضة' };
 

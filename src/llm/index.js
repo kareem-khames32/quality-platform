@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { config } from '../config.js';
 import { getSettings } from '../db.js';
+import { ProviderError } from '../resilience.js';
 
 const cfg = () => config.llm;
 
@@ -68,10 +69,16 @@ ${transcript}
 """`;
 }
 
-let _client;
+let _client = null, _clientKey = null;
 function anthropicClient() {
   const c = cfg();
-  return _client ||= new Anthropic(c.api_key ? { apiKey: c.api_key } : {});
+  const key = c.api_key || process.env.ANTHROPIC_API_KEY || '';
+  // rebuild when the key is changed from the settings page (a cached client would keep using the old key)
+  if (!_client || _clientKey !== key) {
+    _client = new Anthropic({ ...(c.api_key ? { apiKey: c.api_key } : {}), timeout: 120000, maxRetries: 2 });
+    _clientKey = key;
+  }
+  return _client;
 }
 
 const adapters = {
@@ -114,8 +121,9 @@ const adapters = {
         ],
       }),
     });
-    const j = await res.json();
-    if (!res.ok) throw new Error(`LLM ${res.status}: ${JSON.stringify(j).slice(0, 400)}`);
+    const raw = await res.text();
+    if (!res.ok) { const err = new Error(`LLM ${res.status}: ${raw.slice(0, 400)}`); err.status = res.status; throw err; }
+    const j = JSON.parse(raw);
     const text = j.choices?.[0]?.message?.content || '';
     const m = text.match(/\{[\s\S]*\}/);
     if (!m) throw new Error('LLM returned no JSON');
@@ -136,7 +144,26 @@ export async function analyzeWithLLM(input) {
   const fn = adapters[p];
   if (!fn) throw new Error(`unknown LLM provider "${p}"`);
   const t = Date.now();
-  const out = await fn(input);
+  let out;
+  try { out = await fn(input); } catch (e) { throw toProviderError(e); }
   if (out) out.took_ms = Date.now() - t;
   return out;
+}
+
+/**
+ * Map SDK / HTTP failures to ProviderError so the AI lane pauses as a whole (and resumes by itself) instead of
+ * failing calls one by one. Anything else (refusal, unparseable output) stays a call-level error.
+ */
+function toProviderError(e) {
+  if (!e || e.name === 'ProviderError') return e;
+  const status = Number(e.status) || 0;
+  const msg = String(e.message || e).slice(0, 400);
+  const probe = `${e.name || ''} ${msg}`;
+  if (status === 402 || /credit balance|billing|insufficient[_ ](credit|fund|balance)|exceeded your current quota/i.test(msg)) return new ProviderError('llm', 'billing', msg);
+  if (status === 401 || status === 403 || /invalid x-api-key|authentication_error|permission_error/i.test(msg)) return new ProviderError('llm', 'auth', msg);
+  if (status === 404 && /model/i.test(msg)) return new ProviderError('llm', 'auth', msg);   // wrong model name = configuration problem
+  if (status === 429) return new ProviderError('llm', 'rate_limit', msg);
+  if (status === 529 || (status >= 500 && status < 600) || /overloaded/i.test(msg)) return new ProviderError('llm', 'provider_down', msg);
+  if (/APIConnection|fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timed out|Request timed out/i.test(probe)) return new ProviderError('llm', 'network', msg);
+  return e;
 }

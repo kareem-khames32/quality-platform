@@ -5,7 +5,7 @@
     <% if (unread) { %><form method="POST" action="/notifications/read-all" class="inline-form"><button class="btn secondary sm">تعليم الكل كمقروء</button></form><% } %>
   </div>
   <% if (!rows.length) { %><p class="muted">لا توجد إشعارات.</p><% } %>
-  <% const icons = { created: '🆕', escalate: '⏭', assign: '👤', comment: '💬', status: '🔁' }; %>
+  <% const icons = { created: '🆕', escalate: '⏭', assign: '👤', comment: '💬', status: '🔁', closed: '✅', system: '🩺' }; %>
   <% for (const n of rows) { %>
   <a href="/notifications/<%= n.id %>/go" class="notif <%= n.read_at ? '' : 'unread' %>" style="color:inherit">
     <span class="kind"><%= icons[n.kind] || '🔔' %></span>
