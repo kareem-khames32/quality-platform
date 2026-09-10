@@ -100,10 +100,15 @@ async function sonioxGetPatient(path, label, deadline) {
 
 /** Delete one Soniox resource; failures are remembered in soniox_leftovers and retried by the janitor. */
 async function sonioxDelete(kind, id) {
-  try {
-    const res = await fetch(`${sonioxBase()}/${kind}/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${cfg().api_key}` }, signal: AbortSignal.timeout(20000) });
-    if (res.ok || res.status === 404) { q.run('DELETE FROM soniox_leftovers WHERE kind=? AND id=?', kind, id); return true; }
-  } catch {}
+  // Soniox rate-limits bursts of deletes (seen in production: ~half of a 2,000-delete burst refused): back off and retry
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${sonioxBase()}/${kind}/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${cfg().api_key}` }, signal: AbortSignal.timeout(20000) });
+      if (res.ok || res.status === 404) { q.run('DELETE FROM soniox_leftovers WHERE kind=? AND id=?', kind, id); return true; }
+      if (res.status !== 429 && res.status < 500) break;   // e.g. 409 still processing: the janitor retries later
+    } catch {}
+    await sleep(2000 * (attempt + 1));
+  }
   try { q.run('INSERT OR IGNORE INTO soniox_leftovers(kind, id, created_at) VALUES(?,?,?)', kind, id, nowIso()); } catch {}
   return false;
 }
@@ -222,7 +227,7 @@ async function runJanitor({ minAgeSec = 120 } = {}) {
     }
     trDel.push(t.id);
   }
-  await pool(trDel, 8, async (id) => { (await sonioxDelete('transcriptions', id)) ? res.transcriptions_deleted++ : res.delete_errors++; });
+  await pool(trDel, 3, async (id) => { (await sonioxDelete('transcriptions', id)) ? res.transcriptions_deleted++ : res.delete_errors++; });
 
   const files = await listAll('files');
   const fDel = [];
@@ -231,11 +236,11 @@ async function runJanitor({ minAgeSec = 120 } = {}) {
     if (active.files.has(f.id) || keepFiles.has(f.id) || age(f) < minAgeSec) { res.kept_in_use++; continue; }
     fDel.push(f.id);
   }
-  await pool(fDel, 8, async (id) => { (await sonioxDelete('files', id)) ? res.files_deleted++ : res.delete_errors++; });
+  await pool(fDel, 3, async (id) => { (await sonioxDelete('files', id)) ? res.files_deleted++ : res.delete_errors++; });
 
   // ids whose delete failed earlier (e.g. network blip right after a transcription)
   const left = q.all('SELECT kind, id FROM soniox_leftovers ORDER BY created_at LIMIT 5000').filter((r) => !(r.kind === 'files' ? active.files : active.transcriptions).has(r.id));
-  await pool(left, 8, async (r) => { await sonioxDelete(r.kind, r.id); });
+  await pool(left, 3, async (r) => { await sonioxDelete(r.kind, r.id); });
 
   Object.assign(res, { files_remaining: files.length - res.files_deleted, transcriptions_remaining: trs.length - res.transcriptions_deleted, took_ms: Date.now() - t0, at: nowIso() });
   lastJanitor = res;
