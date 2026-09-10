@@ -21,6 +21,12 @@ export function parseClid(clid, src) {
 }
 
 /** Strip trunk dial-prefixes and keep the subscriber number as the branch systems store it. */
+/** True when either side of the call carries a customer-length number (false = internal ext-to-ext call or a CDR without any number). */
+export function hasCustomerNumber(phone, ext) {
+  const len = (v) => String(v || '').replace(/D/g, '').length;
+  return len(phone) >= 7 || len(ext) >= 7;
+}
+
 export function normalizePhone(dst) {
   if (!dst) return '';
   const digits = String(dst).replace(/\D/g, '');

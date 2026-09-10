@@ -5,7 +5,7 @@
 import sql from 'mssql';
 import { config } from './config.js';
 import { db, getSettings, usageToday, q } from './db.js';
-import { parseClid, normalizePhone, toLocalStamp, nowIso, sleep } from './util.js';
+import { parseClid, normalizePhone, hasCustomerNumber, toLocalStamp, nowIso, sleep } from './util.js';
 import { beat } from './resilience.js';
 
 const log = (...a) => console.log(new Date().toISOString(), '[collector]', ...a);
@@ -32,6 +32,8 @@ export function evaluateRules(call, settings) {
   if (call.disposition !== 'ANSWERED') return { queue: false, reason: 'not_answered' };
   if (settings.min_billsec && call.billsec < settings.min_billsec) return { queue: false, reason: 'too_short' };
   if (settings.max_billsec && call.billsec > settings.max_billsec) return { queue: false, reason: 'too_long' };
+  // internal ext-to-ext calls and CDRs without any number: there is no customer recording to find for them
+  if (settings.skip_no_customer_number !== false && !hasCustomerNumber(call.phone, call.agent_ext)) return { queue: false, reason: 'no_customer_number' };
   if (settings.allowed_servers?.length && !settings.allowed_servers.includes(call.server_name)) return { queue: false, reason: 'server_excluded' };
   if (settings.daily_cap && usageToday('auto_queued') >= settings.daily_cap) return { queue: false, reason: 'daily_cap' };
   if (settings.sample_percent < 100 && Math.random() * 100 >= settings.sample_percent) return { queue: false, reason: 'sampled_out' };
@@ -80,7 +82,7 @@ export async function collectWarehouse(w) {
       for (const row of rows) {
         const { name, ext } = parseClid(row.clid, row.src);
         const calldate = toLocalStamp(new Date(row.calldate));
-        const call = { server_name: row.server_name, billsec: row.billsec, disposition: row.disposition };
+        const call = { server_name: row.server_name, billsec: row.billsec, disposition: row.disposition, phone: normalizePhone(row.dst), agent_ext: ext };
         const rule = evaluateRules(call, settings);
         const status = row.disposition !== 'ANSWERED' ? 'skipped' : (rule.queue ? 'queued' : 'new');
         const res = insertCall.run(

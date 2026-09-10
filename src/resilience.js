@@ -89,6 +89,11 @@ function restore(p) {
 }
 const circuits = { stt: restore('stt'), llm: restore('llm') };
 const recoverHooks = { stt: [], llm: [] };
+// timeouts / 5xx / 429 on single requests among dozens in parallel are blips, not outages: while the provider works,
+// the circuit opens only after TRANSIENT_TRIP of them within a minute (billing / auth / quota / config open at once)
+const TRANSIENT = new Set(['network', 'provider_down', 'rate_limit']);
+const TRANSIENT_TRIP = 3;
+const blips = { stt: [], llm: [] };
 
 function persist(p) {
   const c = circuits[p];
@@ -144,6 +149,13 @@ export function recordFailure(p, err) {
   const kind = err?.kind || 'provider_down';
   const msg = String(err?.message || err).slice(0, 400);
   c.last_error_at = nowIso();
+  if (c.state === 'closed' && TRANSIENT.has(kind)) {
+    const now = Date.now(), win = FAST ? 5000 : 60000;
+    blips[p] = blips[p].filter((t) => now - t < win);
+    blips[p].push(now);
+    if (blips[p].length < TRANSIENT_TRIP) { log(`${p}: ${kind} on one request (${blips[p].length}/${TRANSIENT_TRIP} in a minute), lane keeps running — ${msg}`); return; }
+    blips[p] = [];
+  }
   // several in-flight calls usually fail together: only the first one moves the circuit
   if (c.state === 'open' && Date.now() < c.until) {
     c.message = msg;

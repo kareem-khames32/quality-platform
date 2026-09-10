@@ -180,6 +180,7 @@ export const DEFAULT_SETTINGS = {
   sample_percent: 100,           // % of eligible calls to transcribe automatically
   daily_cap: 2000,               // max auto-transcriptions per day (0 = unlimited)
   allowed_servers: [],           // [] = all servers
+  skip_no_customer_number: true, // don't auto-queue calls with no customer number on either side (internal ext-to-ext calls, CDRs without a number)
   ticket_on_banned_min_severity: 'medium',   // low | medium | high
   ticket_on_complaint: true,
   default_company_id: null,

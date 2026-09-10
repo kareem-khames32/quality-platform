@@ -5,6 +5,7 @@
     <form method="POST" action="/admin/settings">
       <div class="field"><label><input type="checkbox" name="auto_transcribe" <%= settings.auto_transcribe ? 'checked' : '' %>> تفعيل التحويل التلقائي للمكالمات الجديدة المطابقة للقواعد</label></div>
       <div class="field"><label><input type="checkbox" name="ingest_only_answered" <%= settings.ingest_only_answered ? 'checked' : '' %>> سحب المكالمات المردودة فقط (ANSWERED) من المستودعات</label></div>
+      <div class="field"><label><input type="checkbox" name="skip_no_customer_number" <%= settings.skip_no_customer_number !== false ? 'checked' : '' %>> تجاهل المكالمات اللي مفيهاش رقم عميل في أي طرف (مكالمات داخلية بين تحويلتين، أو سجل من غير رقم): تسجيلها مش بيتلاقي على الفروع فبتضيّع وقت التحويل. تقدر تحوّل أي واحدة منها يدوياً.</label></div>
       <div class="row">
         <div><label>أقل مدة مكالمة (ثانية)</label><input type="number" name="min_billsec" value="<%= settings.min_billsec %>" min="0"></div>
         <div><label>أقصى مدة (0 = بلا حد)</label><input type="number" name="max_billsec" value="<%= settings.max_billsec %>" min="0"></div>

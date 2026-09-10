@@ -298,11 +298,14 @@ export function recoverOnStartup() {
   // queued calls whose retries were charged by provider errors under the old code: give them their retries back
   const legacyRetries = q.run(`UPDATE calls SET retries=0, retry_after=NULL WHERE status='queued' AND retries>0 AND COALESCE(error,'') NOT LIKE '✖%' AND ${LEGACY_PROVIDER_ERROR_SQL}`).changes;
   const emptyAudio = q.run(`UPDATE calls SET status='skipped', skip_reason='empty_audio' WHERE status='failed' AND (error LIKE '%invalid_audio_file%' OR error LIKE '%No audio found%')`).changes;
+  // calls with no customer number on either side (internal ext-to-ext, CDRs without a number) never have a findable recording
+  const noNumber = getSettings().skip_no_customer_number !== false ? q.run(`UPDATE calls SET status='new', skip_reason='no_customer_number', retry_after=NULL
+      WHERE status IN ('queued','failed') AND queued_by IS NULL AND length(COALESCE(phone,'')) < 7 AND length(COALESCE(agent_ext,'')) < 7`).changes : 0;
   const aiMissing = llmReady() ? requeueFlaggedWithoutAI() : 0;
-  if (inFlightNoText + inFlightText + providerFailed + legacyRetries + emptyAudio + aiMissing) {
-    log(`recovery: ${inFlightNoText + inFlightText} in-flight restored, ${providerFailed} provider-failed re-queued, ${emptyAudio} empty-audio marked skipped, ${aiMissing} flagged calls sent to AI, ${legacyRetries} retry counters reset`);
+  if (inFlightNoText + inFlightText + providerFailed + legacyRetries + emptyAudio + aiMissing + noNumber) {
+    log(`recovery: ${inFlightNoText + inFlightText} in-flight restored, ${providerFailed} provider-failed re-queued, ${emptyAudio} empty-audio marked skipped, ${aiMissing} flagged calls sent to AI, ${legacyRetries} retry counters reset, ${noNumber} calls without a customer number taken off the queue`);
   }
-  return { in_flight: inFlightNoText + inFlightText, provider_failed: providerFailed, empty_audio: emptyAudio, ai_missing: aiMissing };
+  return { in_flight: inFlightNoText + inFlightText, provider_failed: providerFailed, empty_audio: emptyAudio, ai_missing: aiMissing, no_customer_number: noNumber };
 }
 
 /**

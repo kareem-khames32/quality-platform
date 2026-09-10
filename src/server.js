@@ -478,6 +478,7 @@ admin.post('/settings', (req, res) => {
   setSetting('sample_percent', Math.min(100, Math.max(0, Number(b.sample_percent) || 0)));
   setSetting('daily_cap', Math.max(0, Number(b.daily_cap) || 0));
   setSetting('allowed_servers', [].concat(b.allowed_servers || []).filter(Boolean));
+  setSetting('skip_no_customer_number', b.skip_no_customer_number === 'on');
   setSetting('ticket_on_banned_min_severity', ['low', 'medium', 'high'].includes(b.ticket_on_banned_min_severity) ? b.ticket_on_banned_min_severity : 'medium');
   setSetting('default_company_id', Number(b.default_company_id) || null);
   setSetting('sla_hours', { high: Math.max(1, Number(b.sla_high) || 4), medium: Math.max(1, Number(b.sla_medium) || 24), low: Math.max(1, Number(b.sla_low) || 72) });

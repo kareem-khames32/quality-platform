@@ -72,6 +72,12 @@ function gatewayMediaPath(kind, branch, filepath) {
 }
 
 /* ======================= matching ======================= */
+/** Number to search the branches by: the customer's number, whichever side of the CDR it ended up on (inbound calls logged as outbound). */
+function searchNumber(call) {
+  const digits = (v) => String(v || '').replace(/D/g, '');
+  for (const v of [call.phone, call.dst_raw, call.agent_ext]) if (digits(v).length >= 7) return String(v);
+  return call.phone || call.dst_raw || '';
+}
 export function candidateBranches(serverName) {
   const m = q.one('SELECT gateway_branch FROM server_map WHERE server_name=?', serverName);
   if (m?.gateway_branch) return m.gateway_branch.split(',').map((s) => s.trim()).filter(Boolean);
@@ -108,7 +114,7 @@ async function resolveViaBranches(call) {
   const wanted = candidateBranches(call.server_name);
   const targets = wanted.length ? all.filter((b) => wanted.includes(b.id)) : all;
   const day = call.calldate.slice(0, 10);
-  const params = { query: call.phone || call.dst_raw || '', date_from: day, date_to: day, sort: 'recent' };
+  const params = { query: searchNumber(call), date_from: day, date_to: day, sort: 'recent' };
   const settled = await Promise.allSettled(targets.map(async (b) => ({ b, files: await searchBranch(b, params) })));
   // prefer a uniqueid hit anywhere; fall back to the best time match
   let fallback = null;
@@ -128,7 +134,7 @@ async function resolveViaBranches(call) {
 
 async function resolveViaGateway(call) {
   const day = call.calldate.slice(0, 10);
-  const params = new URLSearchParams({ query: call.phone || call.dst_raw || '', date_from: day, date_to: day, sort: 'recent', page: '1' });
+  const params = new URLSearchParams({ query: searchNumber(call), date_from: day, date_to: day, sort: 'recent', page: '1' });
   const branches = candidateBranches(call.server_name);
   if (branches.length) {
     const rejected = [];
